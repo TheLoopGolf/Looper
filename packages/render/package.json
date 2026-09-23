@@ -1,0 +1,14 @@
+{
+  "name": "@canvas-ai/render",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tiled compositor for Canvas AI: WebGPU, WebGL2 and CPU reference backends.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/scenes.ts"
+  },
+  "dependencies": {
+    "@canvas-ai/core": "workspace:*"
+  }
+}
