@@ -1,0 +1,29 @@
+{
+  "name": "canvas-ai",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "scripts": {
+    "dev": "pnpm --filter @canvas-ai/web dev",
+    "build": "pnpm --filter @canvas-ai/web build",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "bench": "playwright test --config playwright.bench.config.ts",
+    "desktop:dev": "pnpm --filter @canvas-ai/desktop tauri dev",
+    "desktop:build": "pnpm --filter @canvas-ai/desktop tauri build"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "@webgpu/types": "^0.1.74",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^3.2.4"
+  }
+}

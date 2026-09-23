@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "types": ["node", "@webgpu/types", "vite/client"]
+  },
+  "include": ["packages/*/src", "packages/*/test", "apps/web/src", "apps/desktop/src", "e2e", "*.config.ts"]
+}

@@ -427,3 +427,15 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+## Canvas AI (JS/Rust toolchain)
+node_modules/
+dist/
+target/
+.vite/
+coverage/
+test-results/
+playwright-report/
+*.tsbuildinfo
+# The Visual Studio/NuGet rules above ignore any "packages/" folder; this monorepo keeps sources there.
+!/packages/*
