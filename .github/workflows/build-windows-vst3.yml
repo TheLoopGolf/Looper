@@ -1,0 +1,87 @@
+name: Build Windows VST3
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: windows-vst3-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-vst3:
+    name: Windows x64 VST3
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure (VS 2022 x64)
+        run: >
+          cmake -B build
+          -G "Visual Studio 17 2022"
+          -A x64
+          -DLOOPER_BUILD_PLUGIN=ON
+          -DLOOPER_BUILD_TESTS=ON
+
+      - name: Build unit tests
+        run: >
+          cmake --build build
+          --config Release
+          --target AutoMapperTests DspVoiceTests PatchStoreTests SessionPrefsTests
+          --parallel
+
+      - name: Run unit tests
+        shell: pwsh
+        run: |
+          $failed = 0
+          foreach ($t in @("AutoMapperTests","DspVoiceTests","PatchStoreTests","SessionPrefsTests")) {
+            $exe = Join-Path "build" "Release" "$t.exe"
+            if (-not (Test-Path $exe)) { $exe = Join-Path "build" "$t.exe" }
+            Write-Host "=== $t ==="
+            & $exe
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+          }
+          if ($failed -ne 0) { exit 1 }
+
+      - name: Build VST3
+        run: >
+          cmake --build build
+          --config Release
+          --target Looper_VST3
+          --parallel
+
+      - name: Locate VST3 bundle
+        id: locate
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "build/Looper_artefacts/Release/VST3/Looper.vst3",
+            "build/Looper_artefacts/VST3/Release/Looper.vst3",
+            "build/Looper_artefacts/VST3/Looper.vst3"
+          )
+          $found = $null
+          foreach ($p in $candidates) {
+            if (Test-Path $p) { $found = $p; break }
+          }
+          if (-not $found) {
+            Write-Host "Searching for Looper.vst3..."
+            Get-ChildItem -Path build -Recurse -Filter "Looper.vst3" -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host $_.FullName }
+            throw "Looper.vst3 not found under build/"
+          }
+          Write-Host "Found: $found"
+          "path=$found" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload Windows VST3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Looper-windows-x64-vst3
+          path: ${{ steps.locate.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30

@@ -163,3 +163,19 @@ Streaming sample I/O → relocate missing samples UI → optional dedicated filt
 3. Relocate UI for offline samples after patch/host load.
 4. Parameter smoothing on continuous filter/env params; finish glide DSP.
 5. Choose LICENSE compatible with your JUCE license (GPL vs commercial).
+
+---
+
+## Windows VST3 (CI)
+
+Every push to `main` runs GitHub Actions on `windows-latest` and uploads a **Windows x64 VST3** artifact named `Looper-windows-x64-vst3`.
+
+1. Open the [Actions](https://github.com/TheLoopGolf/Looper/actions) tab
+2. Open the latest **Build Windows VST3** run
+3. Download **Looper-windows-x64-vst3**
+4. Unzip and copy `Looper.vst3` into your DAW’s VST3 folder (often `C:\Program Files\Common Files\VST3`), then rescan
+
+You can also trigger a build manually: Actions → Build Windows VST3 → Run workflow.
+
+Linux VST3 / Standalone are built on the Loop Audio Lab machine; macOS AU+VST3 needs a Mac build.
+
