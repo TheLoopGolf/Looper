@@ -11,7 +11,7 @@ namespace looper {
  * MIDI → voice engine router.
  * Pitch bend: ±2 semitones (14-bit, center 8192).
  * CC1 mod wheel → FilterCutoff (octaves offset) when target is FilterCutoff.
- * CC64 sustain: TODO.
+ * CC64 sustain: value >= 64 = on; VoiceEngine defers noteOff until pedal up.
  */
 class MidiRouter
 {
@@ -57,7 +57,10 @@ public:
             modWheel_ = std::clamp(value, 0, 127) / 127.0f;
             applyModWheel();
         }
-        // CC64 sustain: TODO
+        else if (cc == 64) // sustain pedal
+        {
+            engine_->setSustainPedal(value >= 64);
+        }
     }
 
     void setBendRangeSemis(float semis) { bendRangeSemis_ = semis; }

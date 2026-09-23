@@ -161,7 +161,7 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     initRow(midiRows_[0], "Pitch bend range", "14-bit bend; VoiceEngine applies ±range", &bendBox_);
     initRow(midiRows_[1], "Mod wheel target", "CC1 → filter cutoff or volume", &modBox_);
     initRow(midiRows_[2], "Sustain pedal", "CC64", nullptr);
-    sustainNote_.setText("CC64 handled: TODO — note-off hold not yet in MidiRouter",
+    sustainNote_.setText("CC64 active — note-off deferred while pedal down (VoiceEngine)",
                          juce::dontSendNotification);
     sustainNote_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(sustainNote_);

@@ -21,7 +21,11 @@ struct Voice
     int channel = 0;
     uint64_t age = 0;
     double readPos = 0.0;
-    double pitchRatio = 1.0; // note+bend relative to root (semitone ratio)
+    /** Current playback ratio (may be gliding toward targetPitchRatio). */
+    double pitchRatio = 1.0;
+    double targetPitchRatio = 1.0;
+    /** Per-sample increment toward targetPitchRatio (0 when not gliding). */
+    double glideInc = 0.0;
     double fileToHostRatio = 1.0;
     float velocityAmp = 1.0f;
     float zoneGainLin = 1.0f;
@@ -30,6 +34,10 @@ struct Voice
     AmpEnv ampEnv;
     SvfFilter filter; // dual-state stereo SVF
     bool releasing = false;
+    /** Key physically held (noteOn without matching noteOff yet). */
+    bool gated = false;
+    /** Deferred release while sustain pedal is down. */
+    bool pedalHeld = false;
 };
 
 struct FilterParams
@@ -44,6 +52,7 @@ struct FilterParams
  * Polyphonic voice engine: Hermite resample + AmpEnv ADSR + per-voice SVF.
  * Filter envelope reuses amp ADSR (cutoff *= 2^(envAmount * env)).
  * Zone pick: velocity layers + round-robin cycle per rrGroup.
+ * Legato portamento when InstrumentMap.glideMs > 0; CC64 sustain via setSustainPedal.
  */
 class VoiceEngine
 {
@@ -77,16 +86,18 @@ public:
     /** Soft-clip master bus after voice sum (tanh ceiling). */
     void setMasterSoftClip(bool on) { masterSoftClip_ = on; }
 
-    /**
-     * TODO(glide): InstrumentMap.glideMs is stored from Settings; portamento / legato
-     * glide is not applied in the voice engine yet. Wire glideMs here when implementing.
-     */
-
     /** Extra cutoff offset in octaves (e.g. mod wheel); applied after env mod. */
     void setModCutoffOffsetOctaves(float oct) { modCutoffOctaves_ = oct; }
 
     /** Pitch bend in semitones (±2 default range applied by MidiRouter). */
     void setPitchBendSemis(float semis);
+
+    /**
+     * Sustain pedal (CC64). While down, noteOff defers ampEnv release (pedalHeld).
+     * On pedal up, releases voices that are not still gated.
+     */
+    void setSustainPedal(bool down);
+    bool sustainPedal() const { return sustainPedal_; }
 
     void noteOn(int note, int velocity, int channel);
     void noteOff(int note, int channel);
@@ -97,6 +108,12 @@ public:
     int activeVoiceCount() const;
     float pitchBendSemis() const { return pitchBendSemis_; }
     const FilterParams& filterParams() const { return filterParams_; }
+
+    /**
+     * First active voice matching note/channel, or nullptr.
+     * Intended for tests / diagnostics.
+     */
+    const Voice* findActiveVoice(int note, int channel) const;
 
     /**
      * Velocity-layer + round-robin zone selection.
@@ -112,6 +129,9 @@ private:
     void updateVoicePitchRatio(Voice& v) const;
     void applyFilterGlobals(Voice& v) const;
     double computePitchRatio(int note, const Zone& zone) const;
+    bool channelHasHeldNote(int channel, int excludeVoiceIndex = -1) const;
+    double newestHeldPitchRatio(int channel, int excludeVoiceIndex = -1) const;
+    void setupGlide(Voice& v, double targetRatio, int channel, int voiceIndex);
 
     double sampleRate_ = 44100.0;
     int polyphony_ = 64;
@@ -126,6 +146,7 @@ private:
     float pitchBendSemis_ = 0.0f;
     float modCutoffOctaves_ = 0.0f;
     uint64_t ageCounter_ = 0;
+    bool sustainPedal_ = false;
 
     /** Per-rrGroup cycle counters (rrGroup == 0 unused). */
     std::unordered_map<int, uint32_t> rrCounters_;

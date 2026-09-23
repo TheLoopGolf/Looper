@@ -465,6 +465,202 @@ static void testSelectZoneNoMatch()
     CHECK(emptyEngine.selectZone(60, 100) == nullptr);
 }
 
+
+static void testGlideMsZeroJumpsImmediately()
+{
+    std::cout << "testGlideMsZeroJumpsImmediately\n";
+
+    SamplePool pool;
+    pool.loadDemoSample(44100.0);
+
+    InstrumentMap map;
+    map.zones.push_back(makeDemoZone());
+    map.glideMs = 0.0f;
+    map.polyphonyLimit = 8;
+
+    VoiceEngine engine;
+    engine.setSamplePool(&pool);
+    engine.setMap(&map);
+    engine.setSampleRate(44100.0);
+    engine.setPolyphony(8);
+
+    AmpEnv::Params env;
+    env.attackMs = 1.0f;
+    env.decayMs = 10.0f;
+    env.sustain = 1.0f;
+    env.releaseMs = 50.0f;
+    engine.setEnvParams(env);
+
+    std::vector<float> left(64, 0.0f), right(64, 0.0f);
+
+    engine.noteOn(60, 100, 1);
+    engine.processBlock(left.data(), right.data(), 64);
+    const Voice* v60 = engine.findActiveVoice(60, 1);
+    CHECK(v60 != nullptr);
+    const double ratio60 = v60->pitchRatio;
+    CHECK_NEAR(ratio60, v60->targetPitchRatio, 1e-9);
+
+    // Second note while first held — glideMs=0 → jump to target immediately
+    engine.noteOn(72, 100, 1);
+    const Voice* v72 = engine.findActiveVoice(72, 1);
+    CHECK(v72 != nullptr);
+    CHECK_NEAR(v72->pitchRatio, v72->targetPitchRatio, 1e-9);
+    // C5 vs C4 root 60 → +12 semis → ratio 2.0
+    CHECK_NEAR(v72->targetPitchRatio, 2.0, 1e-6);
+    CHECK_NEAR(v72->pitchRatio, 2.0, 1e-6);
+}
+
+static void testGlideLegatoBetweenOldAndNew()
+{
+    std::cout << "testGlideLegatoBetweenOldAndNew\n";
+
+    SamplePool pool;
+    pool.loadDemoSample(44100.0);
+
+    InstrumentMap map;
+    map.zones.push_back(makeDemoZone());
+    map.glideMs = 100.0f; // long enough that a short block stays mid-glide
+    map.polyphonyLimit = 8;
+
+    VoiceEngine engine;
+    engine.setSamplePool(&pool);
+    engine.setMap(&map);
+    engine.setSampleRate(44100.0);
+    engine.setPolyphony(8);
+
+    AmpEnv::Params env;
+    env.attackMs = 1.0f;
+    env.decayMs = 10.0f;
+    env.sustain = 1.0f;
+    env.releaseMs = 50.0f;
+    engine.setEnvParams(env);
+
+    std::vector<float> left(64, 0.0f), right(64, 0.0f);
+
+    engine.noteOn(60, 100, 1);
+    engine.processBlock(left.data(), right.data(), 64);
+    const Voice* v60 = engine.findActiveVoice(60, 1);
+    CHECK(v60 != nullptr);
+    const double oldRatio = v60->pitchRatio;
+    CHECK_NEAR(oldRatio, 1.0, 1e-6);
+
+    engine.noteOn(72, 100, 1);
+    const Voice* v72Before = engine.findActiveVoice(72, 1);
+    CHECK(v72Before != nullptr);
+    // At noteOn, current should start at old ratio (legato), target at 2.0
+    CHECK_NEAR(v72Before->pitchRatio, oldRatio, 1e-6);
+    CHECK_NEAR(v72Before->targetPitchRatio, 2.0, 1e-6);
+    CHECK(v72Before->glideInc != 0.0);
+
+    // Short process (~1.45 ms of 100 ms glide) — ratio between old and new
+    engine.processBlock(left.data(), right.data(), 64);
+    const Voice* v72 = engine.findActiveVoice(72, 1);
+    CHECK(v72 != nullptr);
+    CHECK(v72->pitchRatio > oldRatio + 1e-6);
+    CHECK(v72->pitchRatio < v72->targetPitchRatio - 1e-6);
+    CHECK(v72->pitchRatio < 2.0 - 1e-4);
+}
+
+static void testSustainPedalDefersNoteOff()
+{
+    std::cout << "testSustainPedalDefersNoteOff\n";
+
+    SamplePool pool;
+    pool.loadDemoSample(44100.0);
+
+    InstrumentMap map;
+    map.zones.push_back(makeDemoZone());
+    map.polyphonyLimit = 4;
+
+    VoiceEngine engine;
+    engine.setSamplePool(&pool);
+    engine.setMap(&map);
+    engine.setSampleRate(44100.0);
+    engine.setPolyphony(4);
+
+    AmpEnv::Params env;
+    env.attackMs = 1.0f;
+    env.decayMs = 5.0f;
+    env.sustain = 1.0f;
+    env.releaseMs = 20.0f;
+    engine.setEnvParams(env);
+
+    std::vector<float> left(256, 0.0f), right(256, 0.0f);
+
+    engine.noteOn(60, 100, 1);
+    engine.processBlock(left.data(), right.data(), 256);
+    CHECK(engine.activeVoiceCount() == 1);
+
+    engine.setSustainPedal(true);
+    CHECK(engine.sustainPedal());
+
+    engine.noteOff(60, 1);
+    engine.processBlock(left.data(), right.data(), 256);
+
+    const Voice* v = engine.findActiveVoice(60, 1);
+    CHECK(v != nullptr);
+    CHECK(v->active);
+    CHECK(!v->releasing);
+    CHECK(!v->gated);
+    CHECK(v->pedalHeld);
+    CHECK(v->ampEnv.stage() == AmpEnv::Stage::Sustain
+          || v->ampEnv.stage() == AmpEnv::Stage::Decay
+          || v->ampEnv.stage() == AmpEnv::Stage::Attack);
+    CHECK(engine.activeVoiceCount() == 1);
+}
+
+static void testSustainPedalUpReleasesDeferred()
+{
+    std::cout << "testSustainPedalUpReleasesDeferred\n";
+
+    SamplePool pool;
+    pool.loadDemoSample(44100.0);
+
+    InstrumentMap map;
+    map.zones.push_back(makeDemoZone());
+    map.polyphonyLimit = 4;
+
+    VoiceEngine engine;
+    engine.setSamplePool(&pool);
+    engine.setMap(&map);
+    engine.setSampleRate(44100.0);
+    engine.setPolyphony(4);
+
+    AmpEnv::Params env;
+    env.attackMs = 1.0f;
+    env.decayMs = 5.0f;
+    env.sustain = 1.0f;
+    env.releaseMs = 30.0f;
+    engine.setEnvParams(env);
+
+    std::vector<float> left(256, 0.0f), right(256, 0.0f);
+
+    engine.noteOn(60, 100, 1);
+    engine.processBlock(left.data(), right.data(), 256);
+    engine.setSustainPedal(true);
+    engine.noteOff(60, 1);
+    engine.processBlock(left.data(), right.data(), 64);
+
+    const Voice* held = engine.findActiveVoice(60, 1);
+    CHECK(held != nullptr);
+    CHECK(held->pedalHeld);
+    CHECK(!held->releasing);
+
+    engine.setSustainPedal(false);
+    CHECK(!engine.sustainPedal());
+
+    const Voice* released = engine.findActiveVoice(60, 1);
+    CHECK(released != nullptr);
+    CHECK(released->releasing);
+    CHECK(!released->pedalHeld);
+    CHECK(released->ampEnv.stage() == AmpEnv::Stage::Release);
+
+    // Drain release
+    for (int b = 0; b < 40; ++b)
+        engine.processBlock(left.data(), right.data(), 256);
+    CHECK(engine.activeVoiceCount() == 0);
+}
+
 int main()
 {
     testHermiteKnownVector();
@@ -478,6 +674,10 @@ int main()
     testRoundRobinCycle();
     testRrGroupZeroFirstWins();
     testSelectZoneNoMatch();
+    testGlideMsZeroJumpsImmediately();
+    testGlideLegatoBetweenOldAndNew();
+    testSustainPedalDefersNoteOff();
+    testSustainPedalUpReleasesDeferred();
 
     std::cout << "\nPassed: " << g_passed << "  Failed: " << g_failed << "\n";
     return g_failed == 0 ? 0 : 1;

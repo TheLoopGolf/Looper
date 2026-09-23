@@ -17,7 +17,7 @@ struct SessionPrefs
 {
     // --- Engine ---
     int polyphony = 64;                 // 1..128
-    float glideMs = 0.0f;               // 0 = off; stored on map; VoiceEngine glide TODO
+    float glideMs = 0.0f;               // 0 = off; stored on map; VoiceEngine legato portamento
     bool masterSoftClip = false;        // applied at voice-sum output when true
     int defaultFilterType = 0;          // 0=LP, 1=HP, 2=BP → APVTS filterType
 

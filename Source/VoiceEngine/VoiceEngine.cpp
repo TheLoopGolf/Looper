@@ -86,7 +86,87 @@ double VoiceEngine::computePitchRatio(int note, const Zone& zone) const
 
 void VoiceEngine::updateVoicePitchRatio(Voice& v) const
 {
-    v.pitchRatio = computePitchRatio(v.note, v.zone);
+    // Pitch bend updates target immediately; if not mid-glide, snap current too.
+    const double newTarget = computePitchRatio(v.note, v.zone);
+    const bool gliding = (v.glideInc != 0.0)
+                         && (v.pitchRatio != v.targetPitchRatio);
+    v.targetPitchRatio = newTarget;
+    if (!gliding)
+    {
+        v.pitchRatio = newTarget;
+        v.glideInc = 0.0;
+    }
+    else
+    {
+        // Keep current; recompute linear glide remainder over remaining distance
+        // using original glideMs from map if available.
+        const float glideMs = (map_ != nullptr) ? map_->glideMs : 0.0f;
+        if (glideMs <= 0.0f || sampleRate_ <= 0.0)
+        {
+            v.pitchRatio = newTarget;
+            v.glideInc = 0.0;
+        }
+        else
+        {
+            const double samples = std::max(1.0, sampleRate_ * static_cast<double>(glideMs) * 0.001);
+            v.glideInc = (newTarget - v.pitchRatio) / samples;
+        }
+    }
+}
+
+bool VoiceEngine::channelHasHeldNote(int channel, int excludeVoiceIndex) const
+{
+    for (int i = 0; i < polyphony_; ++i)
+    {
+        if (i == excludeVoiceIndex)
+            continue;
+        const auto& v = voices_[static_cast<size_t>(i)];
+        if (v.active && v.channel == channel && !v.releasing && (v.gated || v.pedalHeld))
+            return true;
+    }
+    return false;
+}
+
+double VoiceEngine::newestHeldPitchRatio(int channel, int excludeVoiceIndex) const
+{
+    double ratio = 1.0;
+    uint64_t bestAge = 0;
+    bool found = false;
+    for (int i = 0; i < polyphony_; ++i)
+    {
+        if (i == excludeVoiceIndex)
+            continue;
+        const auto& v = voices_[static_cast<size_t>(i)];
+        if (!v.active || v.channel != channel || v.releasing)
+            continue;
+        if (!(v.gated || v.pedalHeld))
+            continue;
+        if (!found || v.age > bestAge)
+        {
+            bestAge = v.age;
+            ratio = v.pitchRatio;
+            found = true;
+        }
+    }
+    return ratio;
+}
+
+void VoiceEngine::setupGlide(Voice& v, double targetRatio, int channel, int voiceIndex)
+{
+    v.targetPitchRatio = targetRatio;
+    const float glideMs = (map_ != nullptr) ? map_->glideMs : 0.0f;
+    const bool legato = glideMs > 0.0f && channelHasHeldNote(channel, voiceIndex);
+    if (!legato)
+    {
+        v.pitchRatio = targetRatio;
+        v.glideInc = 0.0;
+        return;
+    }
+
+    const double fromRatio = newestHeldPitchRatio(channel, voiceIndex);
+    v.pitchRatio = fromRatio;
+    const double samples = std::max(1.0, sampleRate_ * static_cast<double>(glideMs) * 0.001);
+    v.glideInc = (targetRatio - fromRatio) / samples;
 }
 
 void VoiceEngine::setMap(const InstrumentMap* map)
@@ -254,6 +334,8 @@ void VoiceEngine::startVoice(int voiceIndex, int note, int velocity, int channel
     v.zone = zone;
     v.buffer = std::move(buffer);
     v.releasing = false;
+    v.gated = true;
+    v.pedalHeld = false;
     float velLin = std::clamp(velocity, 1, 127) / 127.0f;
     if (map_ != nullptr)
     {
@@ -275,7 +357,9 @@ void VoiceEngine::startVoice(int voiceIndex, int note, int velocity, int channel
     v.filter.setSampleRate(sampleRate_);
     applyFilterGlobals(v);
     v.filter.reset();
-    updateVoicePitchRatio(v);
+
+    const double target = computePitchRatio(note, zone);
+    setupGlide(v, target, channel, voiceIndex);
 }
 
 void VoiceEngine::noteOn(int note, int velocity, int channel)
@@ -321,20 +405,59 @@ void VoiceEngine::noteOff(int note, int channel)
 {
     for (auto& v : voices_)
     {
-        if (v.active && !v.releasing && v.note == note && v.channel == channel)
+        if (!v.active || v.note != note || v.channel != channel)
+            continue;
+        if (v.releasing)
+            continue;
+
+        v.gated = false;
+        if (sustainPedal_)
         {
+            v.pedalHeld = true;
+            // Defer ampEnv.noteOff until pedal up
+        }
+        else
+        {
+            v.pedalHeld = false;
             v.ampEnv.noteOff();
             v.releasing = true;
         }
     }
 }
 
+void VoiceEngine::setSustainPedal(bool down)
+{
+    if (sustainPedal_ && !down)
+    {
+        // Pedal release: noteOff all deferred voices whose keys are no longer held
+        for (auto& v : voices_)
+        {
+            if (!v.active || v.releasing)
+                continue;
+            if (v.pedalHeld && !v.gated)
+            {
+                v.ampEnv.noteOff();
+                v.releasing = true;
+                v.pedalHeld = false;
+            }
+            else if (v.gated)
+            {
+                v.pedalHeld = false;
+            }
+        }
+    }
+    sustainPedal_ = down;
+}
+
 void VoiceEngine::allNotesOff()
 {
+    sustainPedal_ = false;
     for (auto& v : voices_)
     {
         if (v.active)
         {
+            v.gated = false;
+            v.pedalHeld = false;
             v.ampEnv.noteOff();
             v.releasing = true;
         }
@@ -365,7 +488,6 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
         const int64_t endFrame = v.zone.sampleEnd.has_value()
                                      ? std::min(buf.length, *v.zone.sampleEnd)
                                      : buf.length;
-        const double advance = v.pitchRatio * v.fileToHostRatio;
         const float pan = std::clamp(v.zone.pan, -1.0f, 1.0f);
         const float gainL = v.velocityAmp * v.zoneGainLin * masterGainLin_ * (0.5f * (1.0f - pan));
         const float gainR = v.velocityAmp * v.zoneGainLin * masterGainLin_ * (0.5f * (1.0f + pan));
@@ -374,6 +496,18 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
 
         for (int i = 0; i < numSamples; ++i)
         {
+            // Advance legato glide sample-by-sample toward targetPitchRatio
+            if (v.glideInc != 0.0 && v.pitchRatio != v.targetPitchRatio)
+            {
+                v.pitchRatio += v.glideInc;
+                if ((v.glideInc > 0.0 && v.pitchRatio >= v.targetPitchRatio)
+                    || (v.glideInc < 0.0 && v.pitchRatio <= v.targetPitchRatio))
+                {
+                    v.pitchRatio = v.targetPitchRatio;
+                    v.glideInc = 0.0;
+                }
+            }
+
             float env = v.ampEnv.process();
             if (!v.ampEnv.isActive())
             {
@@ -389,6 +523,8 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
                 {
                     v.ampEnv.noteOff();
                     v.releasing = true;
+                    v.gated = false;
+                    v.pedalHeld = false;
                     env = v.ampEnv.level();
                 }
             }
@@ -412,7 +548,7 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
             // Amp after filter (gain from same env)
             left[i] += sL * env * gainL;
             right[i] += sR * env * gainR;
-            v.readPos += advance;
+            v.readPos += v.pitchRatio * v.fileToHostRatio;
         }
 
         if (!v.ampEnv.isActive())
@@ -436,6 +572,16 @@ int VoiceEngine::activeVoiceCount() const
         if (v.active)
             ++n;
     return n;
+}
+
+const Voice* VoiceEngine::findActiveVoice(int note, int channel) const
+{
+    for (const auto& v : voices_)
+    {
+        if (v.active && v.note == note && v.channel == channel)
+            return &v;
+    }
+    return nullptr;
 }
 
 } // namespace looper

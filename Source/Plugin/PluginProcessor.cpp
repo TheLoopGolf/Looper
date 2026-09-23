@@ -189,7 +189,7 @@ void LooperAudioProcessor::applyPrefsToRuntime()
 {
     voiceEngine_.setPolyphony(prefs_.polyphony);
     voiceEngine_.setMasterSoftClip(prefs_.masterSoftClip);
-    // Glide: stored on InstrumentMap; VoiceEngine portamento not implemented yet (see VoiceEngine).
+    // Glide: stored on InstrumentMap.glideMs; VoiceEngine applies legato portamento when > 0.
     midiRouter_.setBendRangeSemis(prefs_.pitchBendRangeSemis);
     midiRouter_.setModWheelTarget(prefs_.modWheelTarget);
 
