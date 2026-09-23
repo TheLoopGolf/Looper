@@ -1,53 +1,56 @@
 #include "SettingsView.h"
+#include "LooperLookAndFeel.h"
 #include "../Plugin/PluginProcessor.h"
 
 namespace looper {
 namespace {
-constexpr uint32_t kBg     = 0xff1c1c20;
-constexpr uint32_t kPanel  = 0xff24242a;
-constexpr uint32_t kBorder = 0xff3a3a48;
-constexpr uint32_t kAccent = 0xff6a8cff;
-constexpr uint32_t kText   = 0xffe8e8ee;
-constexpr uint32_t kMuted  = 0xff9a9aa8;
-constexpr uint32_t kNavSel = 0xff2a3350;
+juce::Colour kBg()      { return Palette::bg(); }
+juce::Colour kPanel()   { return Palette::bgRaised(); }
+juce::Colour kBorder()  { return Palette::border(); }
+juce::Colour kAccent()  { return Palette::fairway(); }
+juce::Colour kText()    { return Palette::text(); }
+juce::Colour kMuted()   { return Palette::muted(); }
+juce::Colour kNavSel()  { return Palette::fairwayDim().withAlpha (0.35f); }
 } // namespace
 
 void SettingsView::styleCombo(juce::ComboBox& c)
 {
-    c.setColour(juce::ComboBox::backgroundColourId, juce::Colour(kPanel));
-    c.setColour(juce::ComboBox::outlineColourId, juce::Colour(kBorder));
-    c.setColour(juce::ComboBox::textColourId, juce::Colour(kText));
-    c.setColour(juce::ComboBox::arrowColourId, juce::Colour(kMuted));
+    c.setColour(juce::ComboBox::backgroundColourId, Palette::bgSunken());
+    c.setColour(juce::ComboBox::outlineColourId, Palette::border());
+    c.setColour(juce::ComboBox::textColourId, Palette::text());
+    c.setColour(juce::ComboBox::arrowColourId, Palette::muted());
 }
 
 SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(processor)
 {
-    brand_.setText("LOOPER  Loop Audio Lab", juce::dontSendNotification);
-    brand_.setFont(juce::FontOptions(16.0f, juce::Font::bold));
-    brand_.setColour(juce::Label::textColourId, juce::Colour(kText));
+    setLookAndFeel (&lookAndFeel_);
+
+    brand_.setText("LOOPER", juce::dontSendNotification);
+    brand_.setFont(juce::Font(juce::FontOptions(18.0f, juce::Font::bold)));
+    brand_.setColour(juce::Label::textColourId, kText());
     addAndMakeVisible(brand_);
 
     title_.setText("Settings / preferences", juce::dontSendNotification);
     title_.setFont(juce::FontOptions(18.0f, juce::Font::bold));
-    title_.setColour(juce::Label::textColourId, juce::Colour(kAccent));
+    title_.setColour(juce::Label::textColourId, kAccent());
     addAndMakeVisible(title_);
 
     subtitle_.setText("Engine defaults and library behavior. Patch-specific knobs stay on the main view.",
                       juce::dontSendNotification);
-    subtitle_.setColour(juce::Label::textColourId, juce::Colour(kMuted));
+    subtitle_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(subtitle_);
 
     chromeHint_.setText("Preferences · applies to new maps & this session", juce::dontSendNotification);
-    chromeHint_.setColour(juce::Label::textColourId, juce::Colour(kMuted));
+    chromeHint_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(chromeHint_);
 
-    backBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(kPanel));
-    backBtn_.setColour(juce::TextButton::textColourOffId, juce::Colour(kText));
+    backBtn_.setColour(juce::TextButton::buttonColourId, Palette::bgRaised());
+    backBtn_.setColour(juce::TextButton::textColourOffId, Palette::text());
     backBtn_.onClick = [this] { if (onBack_) onBack_(); };
     addAndMakeVisible(backBtn_);
 
     auto wireNav = [this](juce::TextButton& b, Tab t) {
-        b.setColour(juce::TextButton::textColourOffId, juce::Colour(kText));
+        b.setColour(juce::TextButton::textColourOffId, kText());
         b.onClick = [this, t] { setTab(t); };
         addAndMakeVisible(b);
     };
@@ -58,17 +61,17 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     wireNav(navAbout_, Tab::About);
 
     sectionTitle_.setFont(juce::FontOptions(16.0f, juce::Font::bold));
-    sectionTitle_.setColour(juce::Label::textColourId, juce::Colour(kText));
+    sectionTitle_.setColour(juce::Label::textColourId, kText());
     addAndMakeVisible(sectionTitle_);
-    sectionSub_.setColour(juce::Label::textColourId, juce::Colour(kMuted));
+    sectionSub_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(sectionSub_);
 
     auto initRow = [this](PrefRow& row, const juce::String& t, const juce::String& d, juce::ComboBox* box) {
         row.title.setText(t, juce::dontSendNotification);
-        row.title.setColour(juce::Label::textColourId, juce::Colour(kText));
+        row.title.setColour(juce::Label::textColourId, kText());
         row.title.setFont(juce::FontOptions(14.0f, juce::Font::bold));
         row.desc.setText(d, juce::dontSendNotification);
-        row.desc.setColour(juce::Label::textColourId, juce::Colour(kMuted));
+        row.desc.setColour(juce::Label::textColourId, kMuted());
         row.desc.setFont(juce::FontOptions(12.0f));
         row.combo = box;
         addAndMakeVisible(row.title);
@@ -160,12 +163,12 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     initRow(midiRows_[2], "Sustain pedal", "CC64", nullptr);
     sustainNote_.setText("CC64 handled: TODO — note-off hold not yet in MidiRouter",
                          juce::dontSendNotification);
-    sustainNote_.setColour(juce::Label::textColourId, juce::Colour(kMuted));
+    sustainNote_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(sustainNote_);
     midiRows_[2].extra = &sustainNote_;
 
-    clearLearnBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(kPanel));
-    clearLearnBtn_.setColour(juce::TextButton::textColourOffId, juce::Colour(kText));
+    clearLearnBtn_.setColour(juce::TextButton::buttonColourId, kPanel());
+    clearLearnBtn_.setColour(juce::TextButton::textColourOffId, kText());
     clearLearnBtn_.onClick = [] {
         // MIDI learn not implemented in v1 — stub.
     };
@@ -173,7 +176,7 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
 
     // --- Files ---
     initRow(filesRows_[0], "Last patch path", "Most recent Open / Save location", nullptr);
-    patchPathValue_.setColour(juce::Label::textColourId, juce::Colour(kText));
+    patchPathValue_.setColour(juce::Label::textColourId, kText());
     patchPathValue_.setFont(juce::FontOptions(12.0f));
     addAndMakeVisible(patchPathValue_);
     filesRows_[0].extra = &patchPathValue_;
@@ -181,34 +184,34 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     initRow(filesRows_[1], "Missing-file policy", "Offline list on load; relocate UI later", nullptr);
     missingPolicy_.setText("Missing samples stay offline (zones kept). Relocate UI TODO.",
                            juce::dontSendNotification);
-    missingPolicy_.setColour(juce::Label::textColourId, juce::Colour(kMuted));
+    missingPolicy_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(missingPolicy_);
     filesRows_[1].extra = &missingPolicy_;
 
-    revealFolderBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(kPanel));
-    revealFolderBtn_.setColour(juce::TextButton::textColourOffId, juce::Colour(kText));
+    revealFolderBtn_.setColour(juce::TextButton::buttonColourId, kPanel());
+    revealFolderBtn_.setColour(juce::TextButton::textColourOffId, kText());
     revealFolderBtn_.onClick = [this] { revealLastPatchFolder(); };
     addAndMakeVisible(revealFolderBtn_);
 
     // --- About ---
     aboutName_.setText("Looper", juce::dontSendNotification);
     aboutName_.setFont(juce::FontOptions(18.0f, juce::Font::bold));
-    aboutName_.setColour(juce::Label::textColourId, juce::Colour(kText));
+    aboutName_.setColour(juce::Label::textColourId, kText());
     addAndMakeVisible(aboutName_);
 
     aboutCompany_.setText("Loop Audio Lab", juce::dontSendNotification);
-    aboutCompany_.setColour(juce::Label::textColourId, juce::Colour(kMuted));
+    aboutCompany_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(aboutCompany_);
 
-    aboutVersion_.setColour(juce::Label::textColourId, juce::Colour(kText));
+    aboutVersion_.setColour(juce::Label::textColourId, kText());
     addAndMakeVisible(aboutVersion_);
 
     aboutLink_.setText("https://github.com/TheLoopGolf/Looper", juce::dontSendNotification);
-    aboutLink_.setColour(juce::Label::textColourId, juce::Colour(kAccent));
+    aboutLink_.setColour(juce::Label::textColourId, kAccent());
     aboutLink_.setFont(juce::FontOptions(13.0f, juce::Font::underlined));
     addAndMakeVisible(aboutLink_);
 
-    footerNote_.setColour(juce::Label::textColourId, juce::Colour(kMuted));
+    footerNote_.setColour(juce::Label::textColourId, kMuted());
     footerNote_.setFont(juce::FontOptions(11.0f));
     footerNote_.setText("Settings are global/session · performance knobs remain on main view",
                         juce::dontSendNotification);
@@ -216,6 +219,11 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
 
     setTab(Tab::Engine);
     refreshFromProcessor();
+}
+
+SettingsView::~SettingsView()
+{
+    setLookAndFeel (nullptr);
 }
 
 void SettingsView::setTab(Tab t)
@@ -254,8 +262,9 @@ void SettingsView::updateNavStyles()
 {
     auto paintNav = [](juce::TextButton& b, bool sel) {
         b.setColour(juce::TextButton::buttonColourId,
-                    juce::Colour(sel ? kNavSel : kPanel));
-        b.setColour(juce::TextButton::textColourOffId, juce::Colour(kText));
+                    sel ? Palette::fairwayDim().withAlpha (0.45f) : Palette::bgSunken());
+        b.setColour(juce::TextButton::textColourOffId,
+                    sel ? Palette::fairway() : Palette::text());
     };
     paintNav(navEngine_, tab_ == Tab::Engine);
     paintNav(navMapping_, tab_ == Tab::Mapping);
@@ -409,21 +418,42 @@ void SettingsView::revealLastPatchFolder()
 
 void SettingsView::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(kBg));
+    g.fillAll(Palette::bg());
+    auto header = getLocalBounds().reduced(16).removeFromTop(48);
+    drawFlagstick(g, juce::Rectangle<float>((float) header.getX() + 2.0f,
+                                            (float) header.getY() + 4.0f, 16.0f, 22.0f));
+    g.setColour(Palette::brass().withAlpha(0.7f));
+    g.fillRect((float) header.getX(), (float) header.getBottom() - 1.0f, 72.0f, 1.0f);
+
     auto r = getLocalBounds().reduced(16);
     r.removeFromTop(70);
     auto panel = r.toFloat();
-    g.setColour(juce::Colour(kPanel));
-    g.fillRoundedRectangle(panel, 8.0f);
-    g.setColour(juce::Colour(kBorder));
-    g.drawRoundedRectangle(panel, 8.0f, 1.2f);
+    g.setColour(Palette::bgRaised());
+    g.fillRoundedRectangle(panel, 12.0f);
+    g.setColour(Palette::border());
+    g.drawRoundedRectangle(panel, 12.0f, 1.2f);
 
     // left nav rail
     auto body = r.reduced(8);
     body.removeFromTop(40);
     auto nav = body.removeFromLeft(140).toFloat();
-    g.setColour(juce::Colour(0xff1a1a20));
-    g.fillRoundedRectangle(nav, 6.0f);
+    g.setColour(Palette::bgSunken());
+    g.fillRoundedRectangle(nav, 8.0f);
+
+    // Fairway underline cue under selected nav (approx via tab order heights)
+    const int navH = 32;
+    int selIndex = 0;
+    switch (tab_)
+    {
+        case Tab::Engine: selIndex = 0; break;
+        case Tab::Mapping: selIndex = 1; break;
+        case Tab::Midi: selIndex = 2; break;
+        case Tab::Files: selIndex = 3; break;
+        case Tab::About: selIndex = 4; break;
+    }
+    const float uy = nav.getY() + 4.0f + (float) selIndex * (float) navH + (float) navH - 4.0f;
+    g.setColour(Palette::fairway());
+    g.fillRoundedRectangle(nav.getX() + 8.0f, uy, nav.getWidth() - 16.0f, 2.0f, 1.0f);
 }
 
 void SettingsView::layoutRows(juce::Rectangle<int> area, PrefRow* rows, int count)
@@ -446,7 +476,8 @@ void SettingsView::layoutRows(juce::Rectangle<int> area, PrefRow* rows, int coun
 void SettingsView::resized()
 {
     auto r = getLocalBounds().reduced(16);
-    brand_.setBounds(r.removeFromTop(22));
+    auto header = r.removeFromTop(48);
+    brand_.setBounds(header.getX() + 26, header.getY() + 6, 140, 24);
     title_.setBounds(r.removeFromTop(24));
     subtitle_.setBounds(r.removeFromTop(20));
     r.removeFromTop(6);

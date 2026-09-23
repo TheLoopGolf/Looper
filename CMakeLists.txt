@@ -127,6 +127,10 @@ if(LOOPER_BUILD_PLUGIN)
             Source/UI/ReviewMapView.h
             Source/UI/SettingsView.cpp
             Source/UI/SettingsView.h
+            Source/UI/LooperLookAndFeel.cpp
+            Source/UI/LooperLookAndFeel.h
+            Source/UI/ZoneKeyboardComponent.cpp
+            Source/UI/ZoneKeyboardComponent.h
             Source/Prefs/SessionPrefs.h
             Source/SamplePool/SamplePool.h
             Source/InstrumentMap/InstrumentMap.h

@@ -45,6 +45,13 @@ struct Zone
     }
 };
 
+/** Lightweight key-range span for UI zone visualization. */
+struct ZoneKeySpan
+{
+    int low = 0;
+    int high = 127;
+};
+
 enum class VelCurve
 {
     Linear,

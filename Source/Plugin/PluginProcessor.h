@@ -65,6 +65,8 @@ public:
     int zoneCount() const;
     int rootCount() const;
     int rrDepth() const;
+    /** Message-thread / UI: key spans for zone keyboard visualization. */
+    std::vector<looper::ZoneKeySpan> getZoneKeySpans() const;
     const std::vector<SampleRef>& userSampleRefs() const { return userSampleRefs_; }
 
     /** Message-thread: decode + AutoMapper → pending review. */

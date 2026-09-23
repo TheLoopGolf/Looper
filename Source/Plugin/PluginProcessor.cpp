@@ -105,6 +105,16 @@ int LooperAudioProcessor::zoneCount() const
     return (int) map_.zones.size();
 }
 
+std::vector<looper::ZoneKeySpan> LooperAudioProcessor::getZoneKeySpans() const
+{
+    std::lock_guard<std::mutex> lock(mapMutex_);
+    std::vector<looper::ZoneKeySpan> out;
+    out.reserve(map_.zones.size());
+    for (const auto& z : map_.zones)
+        out.push_back({ z.keyLow, z.keyHigh });
+    return out;
+}
+
 int LooperAudioProcessor::rootCount() const
 {
     std::lock_guard<std::mutex> lock(mapMutex_);

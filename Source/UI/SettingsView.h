@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "LooperLookAndFeel.h"
 #include <functional>
 
 class LooperAudioProcessor;
@@ -14,7 +15,7 @@ public:
     using BackFn = std::function<void()>;
 
     explicit SettingsView(LooperAudioProcessor& processor);
-    ~SettingsView() override = default;
+    ~SettingsView() override;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
@@ -46,6 +47,8 @@ private:
     LooperAudioProcessor& processor_;
     BackFn onBack_;
     Tab tab_ = Tab::Engine;
+
+    LooperLookAndFeel lookAndFeel_;
 
     juce::Label brand_, title_, subtitle_, chromeHint_;
     juce::TextButton backBtn_ { "← Back to play" };
