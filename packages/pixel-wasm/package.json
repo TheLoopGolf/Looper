@@ -1,0 +1,10 @@
+{
+  "name": "@canvas-ai/pixel-wasm",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rust pixel kernels (wasm32 for the browser, native for Tauri).",
+  "scripts": {
+    "test": "cargo test",
+    "build": "cargo build --release --target wasm32-unknown-unknown"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@canvas-ai/plugins",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Plugin manifest, permissions and (from M6) sandboxed host for Canvas AI.",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@canvas-ai/core": "workspace:*"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "@canvas-ai/ai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "AI provider abstraction and agents for Canvas AI (implementation starts in M4/M5).",
+  "exports": { ".": "./src/index.ts" },
+  "dependencies": {
+    "@canvas-ai/core": "workspace:*"
+  }
+}
