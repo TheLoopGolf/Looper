@@ -1,0 +1,49 @@
+# Build
+build/
+cmake-build-*/
+out/
+Build/
+Builds/
+
+# JUCE / CMake fetch
+_deps/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+DartConfiguration.tcl
+
+# IDE
+.idea/
+.vscode/
+*.xcodeproj/
+*.xcworkspace/
+*.user
+*.suo
+*.ncb
+*.sdf
+*.opensdf
+.vs/
+*.VC.db
+*.VC.opendb
+
+# macOS / Windows junk
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Plugin artifacts
+*.vst3/
+*.component/
+*.dll
+*.so
+*.dylib
+
+# Misc
+*.log
+*.tmp
+.cache/
+build-plugin/
+build-tests/
