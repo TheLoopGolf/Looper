@@ -265,6 +265,11 @@ static void testRelativePathOnSaveLoad()
         }
     }
 
+    // Windows drive-letter resolve must not duplicate the drive (regression)
+    CHECK_EQ(PatchStore::resolveAgainst("samples/a.wav", "C:/proj/kit"), std::string("C:/proj/kit/samples/a.wav"));
+    CHECK_EQ(PatchStore::resolveAgainst("../x.wav", "D:\\a\\Looper"), std::string("D:/a/x.wav"));
+    CHECK_EQ(PatchStore::resolveAgainst(PatchStore::makeRelativeTo("C:/p/s/a.wav", "C:/p"), "C:/p"), std::string("C:/p/s/a.wav"));
+
     auto loaded = PatchStore::load(patchPath);
     CHECK(loaded.has_value());
     if (!loaded) return;

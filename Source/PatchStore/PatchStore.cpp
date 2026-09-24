@@ -768,16 +768,20 @@ std::string PatchStore::resolveAgainst(const std::string& path, const std::strin
     if (baseDir.empty())
         return normalizePath(path);
 
+    const bool abs = isAbsolutePath(baseDir);
+    std::string drive;
     auto base = normalizePath(baseDir);
+    // Strip a Windows drive prefix before splitting so it is not duplicated
+    // (otherwise "C:/dir" + "a.wav" became "C:/C:/dir/a.wav").
+    if (base.size() >= 2 && std::isalpha(static_cast<unsigned char>(base[0])) && base[1] == ':')
+    {
+        drive = base.substr(0, 2);
+        base = base.substr(2);
+    }
     auto parts = splitPath(base);
     auto more = splitPath(path);
     parts.insert(parts.end(), more.begin(), more.end());
     parts = collapseParts(parts);
-
-    const bool abs = isAbsolutePath(baseDir);
-    std::string drive;
-    if (baseDir.size() >= 2 && std::isalpha(static_cast<unsigned char>(baseDir[0])) && baseDir[1] == ':')
-        drive = baseDir.substr(0, 2);
 
     if (!drive.empty())
     {
