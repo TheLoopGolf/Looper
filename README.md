@@ -177,5 +177,27 @@ Every push to `main` runs GitHub Actions on `windows-latest` and uploads a **Win
 
 You can also trigger a build manually: Actions → Build Windows VST3 → Run workflow.
 
-Linux VST3 / Standalone are built on the Loop Audio Lab machine; macOS AU+VST3 needs a Mac build.
+Linux VST3 / Standalone are built on the Loop Audio Lab machine; macOS AU+VST3 are built by the macOS workflow below.
+
+## macOS AU / VST3 (CI)
+
+Every push to `main` also runs GitHub Actions on `macos-latest` and uploads a **universal (Apple Silicon + Intel, macOS 11.0+)** artifact named `Looper-macos-universal`. It contains `Looper-macos-universal-vst3.zip`, `Looper-macos-universal-au.zip`, `Looper-macos-universal-standalone.zip` and `INSTALL.txt`. The workflow runs every `*Tests` suite, ad-hoc signs the bundles and runs `auval -v aumu LoAp Loop`.
+
+1. Open the [Actions](https://github.com/TheLoopGolf/Looper/actions) tab
+2. Open the latest **Build macOS AU + VST3** run
+3. Download **Looper-macos-universal** and unzip the zips you need
+4. Copy the plug-ins and clear the quarantine flag. The builds are ad-hoc signed only, not notarized:
+
+```bash
+mkdir -p ~/Library/Audio/Plug-Ins/VST3 ~/Library/Audio/Plug-Ins/Components
+cp -R Looper.vst3 ~/Library/Audio/Plug-Ins/VST3/
+cp -R Looper.component ~/Library/Audio/Plug-Ins/Components/
+xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/Looper.vst3
+xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Looper.component
+killall -9 AudioComponentRegistrar 2>/dev/null || true
+```
+
+5. Rescan plug-ins or restart your DAW. In Logic Pro, open Settings → Plug-in Manager, select Looper and choose **Reset & Rescan Selection**.
+
+You can also trigger a build manually: Actions → Build macOS AU + VST3 → Run workflow.
 
