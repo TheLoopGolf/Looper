@@ -29,7 +29,7 @@ Product & DSP design (authoritative): [`docs/PRODUCT.md`](docs/PRODUCT.md), [`do
 
 ```
 Source/
-  AutoMapper/       Filename parse + zone building (implemented); YIN stub
+  AutoMapper/       Filename parse + zone building + YIN pitch detection (PitchDetector)
   InstrumentMap/    Zone, SampleRef, InstrumentMap types
   SamplePool/       RAM SampleBuffer pool + demo tone generator
   VoiceEngine/      Polyphony, steal, Hermite + AmpEnv + SVF; vel layers + RR cycle
@@ -43,6 +43,7 @@ Source/
   Plugin/           PluginProcessor + PluginEditor (APVTS ADSR/Volume/Filter)
 Tests/
   AutoMapperTests.cpp
+  PitchDetectorTests.cpp YIN accuracy (sines/saws/plucks A0–C8), noise/silence/short/stereo
   DspVoiceTests.cpp   Hermite / AmpEnv / SVF / offline VoiceEngine
   PatchStoreTests.cpp JSON round-trip + relative paths
   SessionPrefsTests.cpp prefs serialize round-trip
@@ -51,6 +52,24 @@ docs/               Product, DSP, wireframes
 
 Libraries: `LooperAutoMapper` (filename map), `LooperDsp` (Hermite/AmpEnv/SamplePool/VoiceEngine/SVF, **no JUCE**), `LooperPatch` (JSON patch IO + SessionPrefs, **no JUCE**). Plugin links all three.
 
+### Automatic pitch detection
+
+Samples whose filename has no note name (e.g. `Pluck_alpha.wav`) are analysed on import with
+**YIN** (`Source/AutoMapper/PitchDetector.*`, plain C++, no JUCE):
+
+- Mix to mono, remove DC, find the onset, skip ~70 ms of attack, then run YIN on up to 9
+  frames spread across the next ~1.5 s (frames that decayed > 40 dB are ignored).
+- Per frame: difference function (FFT autocorrelation) → cumulative mean normalised
+  difference → first dip below 0.12 (smallest lag, avoids octave-low errors) → octave-high
+  guard → parabolic interpolation. Range 27.5 Hz–4.2 kHz (A0–C8).
+- Median f0 across frames → nearest MIDI note (C4 = 60, A4 = 440 Hz) + cents offset.
+  Confidence = periodicity × frame agreement; < 0.5 → **unpitched** (drums/noise/silence).
+- A filename note always wins. Detected roots set the zone root; `Zone::tuneCents` gets
+  −cents so detuned samples play in tune. Unpitched samples use the Settings → Mapping
+  *unpitched fallback* (equal spread + warn). Review map shows e.g.
+  `Detected C#3 (−12 ct) 92%`, and warns below 80 % confidence.
+- Cost: a few ms per sample (≈17 ms for a 3 s stereo 48 kHz file in an unoptimised build).
+
 ### Implemented vs TODO
 
 | Area | Status |
@@ -58,7 +77,7 @@ Libraries: `LooperAutoMapper` (filename map), `LooperDsp` (Hermite/AmpEnv/Sample
 | Filename → note / vel / RR tokens | **Done** |
 | Velocity layer midpoints, key midpoints, RR groups | **Done** |
 | Duplicate warnings, deterministic maps | **Done** |
-| YIN pitch detect | Stub (null / low confidence) |
+| YIN pitch detect (no note in filename) | **Done** — root key + fine-tune cents + confidence; unpitched → spread fallback |
 | Hermite resampling + voice steal | **Done** |
 | Demo RAM sample + single full-range zone | **Done** |
 | Linear AmpEnv ADSR + APVTS params | **Done** |
@@ -150,16 +169,16 @@ Session prefs persist in host state (`prefsJson` alongside patch). Mapping optio
 
 **Done:** drop/browse import → AutoMapper → Review map → Accept into playable map; APVTS knobs; thread-safe map swap via `shared_ptr`/`adoptMap`; Settings screen with session prefs.
 
-**Polish TODOs:** keyboard strip graphic, locate/relocate missing files UI, YIN pitch detect (stub today), glide/portamento DSP, sustain pedal, MIDI learn.
+**Polish TODOs:** keyboard strip graphic, locate/relocate missing files UI, glide/portamento DSP, sustain pedal, MIDI learn.
 
 ## Next milestone
 
-Streaming sample I/O → relocate missing samples UI → optional dedicated filter envelope → YIN when filename pitch is missing.
+Streaming sample I/O → relocate missing samples UI → optional dedicated filter envelope.
 
 ## Contributing / next steps
 
 1. Keyboard strip zone visualization per wireframes.
-2. Replace pitch stub with YIN when filename pitch is missing.
+2. Optional: flag filename-vs-detected pitch mismatches in Review.
 3. Relocate UI for offline samples after patch/host load.
 4. Parameter smoothing on continuous filter/env params; finish glide DSP.
 5. Choose LICENSE compatible with your JUCE license (GPL vs commercial).

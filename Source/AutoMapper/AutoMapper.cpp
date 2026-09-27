@@ -16,6 +16,8 @@ struct WorkingSample
     int rootKey = 60;
     PitchSource source = PitchSource::Spread;
     float confidence = 0.0f;
+    float tuneCents = 0.0f;
+    std::optional<PitchAnalysis> pitch;
     std::optional<int> velocityHint; // unset → treat as mid later for sorting
     int rrIndex = 0;
     std::vector<std::string> warnings;
@@ -104,19 +106,40 @@ std::map<int, std::pair<int, int>> keyRangesForRoots(std::vector<int> roots, boo
     return out;
 }
 
-} // namespace
-
-PitchDetectResult AutoMapper::detectPitchStub(const SampleRef&)
+std::string formatCents(float cents)
 {
-    // TODO: YIN (or MCM) on center window after onset; accept only high periodicity.
-    PitchDetectResult r;
-    r.pitchHz = std::nullopt;
-    r.rootKey = std::nullopt;
-    r.confidence = 0.0f;
-    return r;
+    const int c = static_cast<int>(std::lround(cents));
+    if (c == 0)
+        return "0 ct";
+    // U+2212 MINUS SIGN for negatives, '+' for positives
+    return (c < 0 ? std::string("\xE2\x88\x92") + std::to_string(-c) : "+" + std::to_string(c)) + " ct";
 }
 
-AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOptions opt)
+} // namespace
+
+std::string describePitch(const SampleReview& r)
+{
+    const int pct = static_cast<int>(std::lround(r.confidence * 100.0f));
+    switch (r.source)
+    {
+        case PitchSource::Filename:
+            return "Filename " + midiToNoteName(r.rootKey);
+        case PitchSource::Detected:
+        {
+            const float cents = r.pitch ? r.pitch->cents : -r.tuneCents;
+            return "Detected " + midiToNoteName(r.rootKey) + " (" + formatCents(cents) + ") "
+                 + std::to_string(pct) + "%";
+        }
+        case PitchSource::Spread:
+            break;
+    }
+    if (r.pitch && r.pitch->analysed)
+        return "Unpitched (" + r.pitch->reason + ") \xE2\x86\x92 " + midiToNoteName(r.rootKey);
+    return "No pitch \xE2\x86\x92 " + midiToNoteName(r.rootKey);
+}
+
+AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOptions opt,
+                              const PitchAnalysisMap* analyses)
 {
     AutoMapResult result;
     if (samples.empty())
@@ -140,20 +163,36 @@ AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOpti
         }
         else
         {
-            const auto detected = detectPitchStub(s);
-            if (detected.rootKey && detected.confidence >= 0.7f)
+            if (analyses)
+                if (const auto it = analyses->find(s.id); it != analyses->end() && it->second.analysed)
+                    w.pitch = it->second;
+
+            if (w.pitch && !w.pitch->unpitched && w.pitch->midiNote >= 0 && w.pitch->midiNote <= 127)
             {
-                w.rootKey = *detected.rootKey;
+                w.rootKey = w.pitch->midiNote;
                 w.source = PitchSource::Detected;
-                w.confidence = detected.confidence;
+                w.confidence = w.pitch->confidence;
+                if (opt.applyDetectedFineTune)
+                    w.tuneCents = -w.pitch->cents; // sample is +x ct sharp → play it x ct lower
+                if (w.confidence < opt.lowConfidenceWarnBelow)
+                {
+                    w.warnings.push_back("Low pitch-detection confidence ("
+                                         + std::to_string(static_cast<int>(std::lround(w.confidence * 100.0f)))
+                                         + "%); check root key");
+                }
             }
             else
             {
-                // Unpitched → spread default root (middle C); RR siblings share this
+                // Unpitched fallback (v1: equal spread + warn) → default root (middle C);
+                // RR siblings share this root.
                 w.rootKey = 60;
                 w.source = PitchSource::Spread;
                 w.confidence = 0.25f;
-                w.warnings.push_back("No reliable pitch from filename; using spread/default root");
+                if (w.pitch)
+                    w.warnings.push_back("No note in filename and audio is unpitched ("
+                                         + w.pitch->reason + "); using spread/default root");
+                else
+                    w.warnings.push_back("No reliable pitch from filename; using spread/default root");
             }
         }
 
@@ -254,6 +293,7 @@ AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOpti
                 z.velLow = vr.first;
                 z.velHigh = vr.second;
                 z.rrGroup = rrGroup;
+                z.tuneCents = m->tuneCents;
                 if (m->rrIndex > 0)
                     z.rrIndex = m->rrIndex;
                 else if (hasRr)
@@ -284,6 +324,9 @@ AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOpti
         rev.confidence = w.confidence;
         rev.warnings = w.warnings;
         rev.tokens = w.tokens;
+        rev.rootKey = w.rootKey;
+        rev.tuneCents = w.tuneCents;
+        rev.pitch = w.pitch;
         result.reviews.push_back(rev);
     }
 

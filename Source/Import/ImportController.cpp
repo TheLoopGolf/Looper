@@ -121,6 +121,7 @@ LoadedSample ImportController::loadFileIntoPool(const juce::File& file, SamplePo
     result.ref.durationSamples = buf.length;
     result.ref.sampleRate = buf.sampleRate;
     result.ref.channels = buf.channels;
+    pitchCache_.erase(result.ref.id); // new audio → re-analyse on next import
     pool.addStub(result.ref);
     pool.setBuffer(result.ref.id, std::move(buf));
     result.ok = true;
@@ -145,9 +146,49 @@ bool ImportController::importFiles(const juce::Array<juce::File>& files, SampleP
     }
     if (refs.empty()) { clearPending(); return false; }
 
+    // Pitch-detect samples whose filename has no note token (filename always wins, so
+    // named samples are skipped to keep imports fast). Runs on the calling thread;
+    // ~ a few ms per sample.
+    PitchAnalysisMap analyses;
+    for (auto& ref : refs) {
+        const std::string name = ref.path.empty() ? ref.displayName : ref.path;
+        if (parseFilenameTokens(name).midiNote)
+            continue;
+        const auto buffer = pool.getBuffer(ref.id);
+        if (!buffer)
+            continue;
+        const auto analysis = analysePitch(ref.id, *buffer);
+        analyses[ref.id] = analysis;
+        if (!analysis.unpitched) {
+            ref.detectedPitchHz = analysis.f0Hz;
+            ref.detectedRootKey = analysis.midiNote;
+        } else {
+            ref.detectedPitchHz.reset();
+            ref.detectedRootKey.reset();
+        }
+    }
+
     pendingRefs_ = std::move(refs);
-    pending_ = AutoMapper::map(pendingRefs_, options);
+    pending_ = AutoMapper::map(pendingRefs_, options, &analyses);
     return true;
+}
+
+PitchAnalysis ImportController::analysePitch(const std::string& sampleId, const SampleBuffer& buffer)
+{
+    if (const auto it = pitchCache_.find(sampleId); it != pitchCache_.end())
+        return it->second;
+    const auto frames = static_cast<std::size_t>(std::max<int64_t>(0, buffer.length));
+    const auto needed = frames * static_cast<std::size_t>(std::max(1, buffer.channels));
+    PitchAnalysis a;
+    if (frames > 0 && buffer.interleaved.size() >= needed)
+        a = PitchDetector::analyzeInterleaved(buffer.interleaved.data(), frames,
+                                              buffer.channels, buffer.sampleRate);
+    else {
+        a.analysed = true;
+        a.reason = "no audio";
+    }
+    pitchCache_[sampleId] = a;
+    return a;
 }
 
 } // namespace looper

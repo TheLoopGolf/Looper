@@ -1,8 +1,10 @@
 #pragma once
 
 #include "FilenameTokens.h"
+#include "PitchDetector.h"
 #include "../InstrumentMap/InstrumentMap.h"
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -23,7 +25,13 @@ struct SampleReview
     float confidence = 0.0f;
     std::vector<std::string> warnings;
     FilenameTokens tokens;
+    int rootKey = 60;                    // root actually used for the zone
+    float tuneCents = 0.0f;              // fine-tune written to the zone (−detected cents)
+    std::optional<PitchAnalysis> pitch;  // YIN result when audio was analysed
 };
+
+/** Sample id → YIN analysis of its decoded audio (filled by ImportController / tests). */
+using PitchAnalysisMap = std::map<std::string, PitchAnalysis>;
 
 struct AutoMapOptions
 {
@@ -31,13 +39,13 @@ struct AutoMapOptions
     bool middleCIsC4 = true;
     bool preferFullKeyboardSpan = true;
     bool cycleRrDefault = true;
-};
-
-struct PitchDetectResult
-{
-    std::optional<double> pitchHz;
-    std::optional<int> rootKey;
-    float confidence = 0.0f;
+    /** Write −(detected cents) to Zone::tuneCents so detuned samples play in tune. */
+    bool applyDetectedFineTune = true;
+    /** Detected roots below this confidence still map, but get a review warning. */
+    float lowConfidenceWarnBelow = 0.8f;
+    /** Unpitched fallback (Settings → Mapping). Only "equal spread + warn" exists in v1. */
+    enum class UnpitchedFallback { SpreadWarn };
+    UnpitchedFallback unpitchedFallback = UnpitchedFallback::SpreadWarn;
 };
 
 struct AutoMapResult
@@ -50,15 +58,20 @@ struct AutoMapResult
 class AutoMapper
 {
 public:
-    /** Deterministic: same samples + options → same map. */
-    static AutoMapResult map(const std::vector<SampleRef>& samples,
-                             AutoMapOptions opt = {});
-
     /**
-     * YIN pitch-detect stub. Always returns null / low confidence.
-     * TODO: implement YIN on a center window after onset.
+     * Deterministic: same samples + options (+ analyses) → same map.
+     * Root key priority: filename note token → detected pitch (analyses[id], if pitched)
+     * → unpitched fallback. Pass nullptr when no audio was analysed.
      */
-    static PitchDetectResult detectPitchStub(const SampleRef& sample);
+    static AutoMapResult map(const std::vector<SampleRef>& samples,
+                             AutoMapOptions opt = {},
+                             const PitchAnalysisMap* analyses = nullptr);
 };
+
+/**
+ * One-line pitch summary for the review table, UTF-8, e.g.
+ *   "Detected C#3 (−12 ct) 92%", "Filename C4", "Unpitched (noise/percussive) → C4".
+ */
+std::string describePitch(const SampleReview& review);
 
 } // namespace looper

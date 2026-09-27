@@ -74,6 +74,12 @@ public:
 
     static std::string makeSampleId(const juce::File& file);
 
+    /**
+     * YIN pitch analysis of a decoded buffer (JUCE-free core, see PitchDetector).
+     * Cached per sample id; the cache entry is dropped when the file is reloaded.
+     */
+    PitchAnalysis analysePitch(const std::string& sampleId, const SampleBuffer& buffer);
+
 private:
     juce::AudioFormatManager formatManager_;
     bool formatsReady_ = false;
@@ -81,6 +87,7 @@ private:
     std::vector<SampleRef> pendingRefs_;
     std::optional<AutoMapResult> lastReview_;
     std::vector<SampleRef> lastReviewRefs_;
+    PitchAnalysisMap pitchCache_;
 };
 
 } // namespace looper

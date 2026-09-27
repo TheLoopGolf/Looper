@@ -2,6 +2,8 @@
 #include "../Source/Import/MapCommit.h"
 #include <algorithm>
 #include "../Source/AutoMapper/FilenameTokens.h"
+#include "../Source/AutoMapper/PitchDetector.h"
+#include "SynthSignals.h"
 
 #include <cassert>
 #include <cmath>
@@ -241,15 +243,6 @@ static void testEmptyAndDeterministic()
     }
 }
 
-static void testPitchDetectStub()
-{
-    std::cout << "testPitchDetectStub\n";
-    auto r = AutoMapper::detectPitchStub(makeSample("g", "garbage_xyz.wav"));
-    CHECK(!r.pitchHz.has_value());
-    CHECK(!r.rootKey.has_value());
-    CHECK(r.confidence < 0.5f);
-}
-
 static void testDuplicateWarn()
 {
     std::cout << "testDuplicateWarn\n";
@@ -266,6 +259,154 @@ static void testDuplicateWarn()
     CHECK(warned);
 }
 
+static PitchAnalysis analyse(const std::vector<float>& mono, double sr = 44100.0)
+{
+    return PitchDetector::analyzeMono(mono.data(), mono.size(), sr);
+}
+
+static const SampleReview* findReview(const AutoMapResult& r, const std::string& id)
+{
+    for (const auto& rev : r.reviews)
+        if (rev.sampleId == id)
+            return &rev;
+    return nullptr;
+}
+
+static bool hasWarningContaining(const SampleReview& rev, const std::string& needle)
+{
+    for (const auto& w : rev.warnings)
+        if (w.find(needle) != std::string::npos)
+            return true;
+    return false;
+}
+
+static void testDetectedRootsWithoutFilenameNotes()
+{
+    std::cout << "testDetectedRootsWithoutFilenameNotes\n";
+    const double sr = 44100.0;
+    std::vector<SampleRef> samples = {
+        makeSample("x1", "Pluck_alpha.wav"),
+        makeSample("x2", "Pluck_bravo.wav"),
+        makeSample("x3", "Pluck_delta.wav"),
+    };
+    for (const auto& s : samples)
+        CHECK(!parseFilenameTokens(s.path).midiNote.has_value());
+
+    PitchAnalysisMap analyses;
+    analyses["x1"] = analyse(synth::pluck(synth::midiToHz(48), sr, 1.5));          // C3
+    analyses["x2"] = analyse(synth::pluck(synth::midiToHz(52 + 0.15), sr, 1.5));   // E3 +15 ct
+    analyses["x3"] = analyse(synth::saw(synth::midiToHz(55), sr, 1.0));            // G3
+
+    auto result = AutoMapper::map(samples, {}, &analyses);
+    CHECK_EQ(int(result.map.zones.size()), 3);
+    const Zone* c3 = findZone(result.map, "x1");
+    const Zone* e3 = findZone(result.map, "x2");
+    const Zone* g3 = findZone(result.map, "x3");
+    CHECK(c3 && e3 && g3);
+    if (!(c3 && e3 && g3))
+        return;
+    CHECK_EQ(c3->rootKey, 48);
+    CHECK_EQ(e3->rootKey, 52);
+    CHECK_EQ(g3->rootKey, 55);
+    // Midpoint key spans across the detected roots, full keyboard at the ends
+    CHECK_EQ(c3->keyLow, 0);
+    CHECK_EQ(c3->keyHigh, 50);
+    CHECK_EQ(e3->keyLow, 51);
+    CHECK_EQ(e3->keyHigh, 53);
+    CHECK_EQ(g3->keyLow, 54);
+    CHECK_EQ(g3->keyHigh, 127);
+    // Fine-tune compensates the detune (sample +15 ct sharp → zone −15 ct)
+    CHECK(std::abs(e3->tuneCents + 15.0f) <= 2.0f);
+    CHECK(std::abs(c3->tuneCents) <= 2.0f);
+
+    const SampleReview* rev = findReview(result, "x2");
+    CHECK(rev != nullptr);
+    if (rev)
+    {
+        CHECK(rev->source == PitchSource::Detected);
+        CHECK(rev->confidence >= 0.8f);
+        CHECK(rev->warnings.empty());
+        CHECK(rev->pitch.has_value());
+        const auto label = describePitch(*rev);
+        std::cout << "  review label: " << label << "\n";
+        CHECK(label.rfind("Detected E3 (+15 ct) ", 0) == 0);
+        CHECK(label.back() == '%');
+    }
+}
+
+static void testFilenameNoteBeatsDetection()
+{
+    std::cout << "testFilenameNoteBeatsDetection\n";
+    std::vector<SampleRef> samples = { makeSample("f1", "Piano_C4.wav") };
+    PitchAnalysisMap analyses;
+    analyses["f1"] = analyse(synth::sine(440.0, 44100.0, 1.0)); // audio says A4
+    CHECK_EQ(analyses["f1"].midiNote, 69);
+    auto result = AutoMapper::map(samples, {}, &analyses);
+    CHECK_EQ(int(result.map.zones.size()), 1);
+    CHECK_EQ(result.map.zones[0].rootKey, 60);
+    CHECK(result.map.zones[0].tuneCents == 0.0f);
+    const SampleReview* rev = findReview(result, "f1");
+    CHECK(rev && rev->source == PitchSource::Filename);
+    if (rev)
+        CHECK_EQ(describePitch(*rev), std::string("Filename C4"));
+}
+
+static void testUnpitchedFallbackAndLowConfidence()
+{
+    std::cout << "testUnpitchedFallbackAndLowConfidence\n";
+    std::vector<SampleRef> samples = {
+        makeSample("n1", "hit_x.wav"),
+        makeSample("n2", "tone_y.wav"),
+    };
+    PitchAnalysisMap analyses;
+    analyses["n1"] = analyse(synth::noiseHit(44100.0, 0.5));
+    CHECK(analyses["n1"].unpitched);
+
+    PitchAnalysis weak; // pitched but shaky
+    weak.analysed = true;
+    weak.unpitched = false;
+    weak.f0Hz = 146.83;
+    weak.midiNote = 50; // D3
+    weak.cents = -8.0f;
+    weak.confidence = 0.62f;
+    analyses["n2"] = weak;
+
+    auto result = AutoMapper::map(samples, {}, &analyses);
+    const Zone* noiseZone = findZone(result.map, "n1");
+    const Zone* weakZone = findZone(result.map, "n2");
+    CHECK(noiseZone && weakZone);
+    if (!(noiseZone && weakZone))
+        return;
+    CHECK_EQ(noiseZone->rootKey, 60); // unpitched fallback: spread default root
+    CHECK(noiseZone->tuneCents == 0.0f);
+    CHECK_EQ(weakZone->rootKey, 50);
+    CHECK(std::abs(weakZone->tuneCents - 8.0f) < 1e-4f);
+
+    const SampleReview* nr = findReview(result, "n1");
+    const SampleReview* wr = findReview(result, "n2");
+    CHECK(nr && wr);
+    if (nr && wr)
+    {
+        CHECK(nr->source == PitchSource::Spread);
+        CHECK(hasWarningContaining(*nr, "unpitched"));
+        CHECK(describePitch(*nr).rfind("Unpitched (", 0) == 0);
+        CHECK(wr->source == PitchSource::Detected);
+        CHECK(hasWarningContaining(*wr, "Low pitch-detection confidence (62%)"));
+        CHECK_EQ(describePitch(*wr), std::string("Detected D3 (\xE2\x88\x92" "8 ct) 62%"));
+    }
+
+    // Fine-tune can be disabled
+    AutoMapOptions opt;
+    opt.applyDetectedFineTune = false;
+    auto noTune = AutoMapper::map(samples, opt, &analyses);
+    const Zone* wz = findZone(noTune.map, "n2");
+    CHECK(wz && wz->tuneCents == 0.0f);
+
+    // No analyses at all → legacy behaviour (spread + warn)
+    auto legacy = AutoMapper::map(samples);
+    for (const auto& z : legacy.map.zones)
+        CHECK_EQ(z.rootKey, 60);
+}
 
 static void testCommitAutoMapToInstrument()
 {
@@ -298,9 +439,11 @@ int main()
     testSnareRoundRobin();
     testPadSoftHard();
     testEmptyAndDeterministic();
-    testPitchDetectStub();
     testDuplicateWarn();
     testCommitAutoMapToInstrument();
+    testDetectedRootsWithoutFilenameNotes();
+    testFilenameNoteBeatsDetection();
+    testUnpitchedFallbackAndLowConfidence();
 
     std::cout << "\nPassed: " << g_passed << "  Failed: " << g_failed << "\n";
     return g_failed == 0 ? 0 : 1;

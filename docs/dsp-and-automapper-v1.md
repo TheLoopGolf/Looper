@@ -104,6 +104,12 @@ Ignore noise tokens: `wav`, `sample`, `mapped`, `normalized`, `48k`, `24b`, `loo
 - Onset: simple energy threshold or first sample above −40 dBFS
 - Accept if confidence high (periodicity / YIN probability above threshold); else mark `unpitched`
 - Quantize to nearest MIDI note; store cents offset into `tuneCents` suggestion (user can snap to 0)
+- **Implemented** (`Source/AutoMapper/PitchDetector.*`): YIN threshold 0.12, ~70 ms post-onset
+  skip, up to 9 frames median, 27.5 Hz–4.2 kHz, confidence = (1 − 2·aperiodicity) × frame
+  agreement, unpitched below 0.5, review warning below 0.8. `ImportController` analyses the
+  decoded buffer only when the filename has no note; `AutoMapper::map(samples, opt, &analyses)`
+  consumes the results, writes `Zone::tuneCents = −cents` (option `applyDetectedFineTune`), and
+  records `SampleReview::pitch` for the Review table (`describePitch`).
 
 ### Zone building algorithm
 

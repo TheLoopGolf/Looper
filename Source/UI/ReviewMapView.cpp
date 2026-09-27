@@ -61,12 +61,13 @@ ReviewMapView::ReviewMapView()
     table_.getHeader().addColumn ("RR", 5, 40);
     table_.getHeader().addColumn ("Key span", 6, 100);
     table_.getHeader().addColumn ("Confidence", 7, 90);
+    table_.getHeader().addColumn ("Pitch", 8, 230);
     table_.setColour (juce::ListBox::backgroundColourId, Palette::bgSunken());
     table_.setColour (juce::ListBox::outlineColourId, Palette::border());
     addAndMakeVisible (table_);
 
     footer_.setColour (juce::Label::textColourId, Palette::muted());
-    footer_.setText ("Warnings highlight low-confidence / spread rows.", juce::dontSendNotification);
+    footer_.setText ("Warnings highlight low-confidence / spread rows. Pitch: filename note wins, else YIN detection.", juce::dontSendNotification);
     addAndMakeVisible (footer_);
 }
 
@@ -99,6 +100,9 @@ void ReviewMapView::setResult (const AutoMapResult& result, const std::vector<Sa
         row.sample = nameFor (rev.sampleId);
         row.source = pitchLabel (rev.source);
         row.confidence = juce::String (rev.confidence, 2);
+        row.pitch = juce::String::fromUTF8 (describePitch (rev).c_str());
+        if (! rev.warnings.empty())
+            row.pitch << juce::String::fromUTF8 ("  \xe2\x80\x94 ") << juce::String::fromUTF8 (rev.warnings.front().c_str());
         if (const Zone* z = findZone (result.map, rev.sampleId))
         {
             row.root = midiToNoteName (z->rootKey);
@@ -180,6 +184,7 @@ void ReviewMapView::paintCell (juce::Graphics& g, int row, int col, int w, int h
         case 5: text = r.rr; break;
         case 6: text = r.keySpan; break;
         case 7: text = r.confidence + (r.warning ? " !" : ""); break;
+        case 8: text = r.pitch; break;
         default: break;
     }
     g.setColour (r.warning ? Palette::sand() : Palette::text());

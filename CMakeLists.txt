@@ -15,6 +15,7 @@ option(LOOPER_BUILD_TESTS "Build unit tests" ON)
 add_library(LooperAutoMapper STATIC
     Source/AutoMapper/FilenameTokens.cpp
     Source/AutoMapper/AutoMapper.cpp
+    Source/AutoMapper/PitchDetector.cpp
 )
 target_include_directories(LooperAutoMapper PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/Source
@@ -61,6 +62,10 @@ if(LOOPER_BUILD_TESTS)
     add_executable(AutoMapperTests Tests/AutoMapperTests.cpp)
     target_link_libraries(AutoMapperTests PRIVATE LooperAutoMapper)
     add_test(NAME AutoMapperTests COMMAND AutoMapperTests)
+
+    add_executable(PitchDetectorTests Tests/PitchDetectorTests.cpp)
+    target_link_libraries(PitchDetectorTests PRIVATE LooperAutoMapper)
+    add_test(NAME PitchDetectorTests COMMAND PitchDetectorTests)
 
     add_executable(DspVoiceTests Tests/DspVoiceTests.cpp)
     target_link_libraries(DspVoiceTests PRIVATE LooperDsp)

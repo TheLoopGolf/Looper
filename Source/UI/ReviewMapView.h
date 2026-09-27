@@ -27,7 +27,7 @@ public:
 
 private:
     struct Row {
-        juce::String sample, source, root, vel, rr, keySpan, confidence;
+        juce::String sample, source, root, vel, rr, keySpan, confidence, pitch;
         bool warning = false;
     };
     LooperLookAndFeel lookAndFeel_;
