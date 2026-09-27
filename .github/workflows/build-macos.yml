@@ -1,0 +1,178 @@
+name: Build macOS AU + VST3
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-universal:
+    name: macOS universal (arm64 + x86_64) AU / VST3 / Standalone
+    runs-on: macos-latest
+    timeout-minutes: 90
+
+    env:
+      # From CMakeLists.txt juce_add_plugin: IS_SYNTH TRUE -> aumu,
+      # PLUGIN_CODE LoAp, PLUGIN_MANUFACTURER_CODE Loop
+      AU_TYPE: aumu
+      AU_SUBTYPE: LoAp
+      AU_MANU: Loop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Ensure Ninja
+        run: |
+          if ! command -v ninja >/dev/null 2>&1; then brew install ninja; fi
+          ninja --version
+          cmake --version
+          xcodebuild -version
+
+      - name: Configure (Ninja, Release, universal, macOS 11.0+)
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          "-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64"
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          -DLOOPER_BUILD_PLUGIN=ON
+          -DLOOPER_BUILD_TESTS=ON
+
+      - name: Discover unit test targets
+        id: tests
+        run: |
+          # Any target whose name ends in "Tests" is treated as a test suite.
+          targets=$(cmake --build build --target help \
+            | sed -nE 's/^([A-Za-z0-9_]+Tests): .*/\1/p' | sort -u | tr '\n' ' ')
+          if [ -z "$targets" ]; then
+            echo "No *Tests targets found; falling back to the known suites"
+            targets="AutoMapperTests DspVoiceTests PatchStoreTests SessionPrefsTests"
+          fi
+          echo "Test targets: $targets"
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
+
+      - name: Build unit tests
+        run: cmake --build build --target ${{ steps.tests.outputs.targets }} --parallel
+
+      - name: Run unit tests
+        run: |
+          failed=0
+          for t in ${{ steps.tests.outputs.targets }}; do
+            exe="build/$t"
+            [ -x "$exe" ] || exe=$(find build -type f -perm -u+x -name "$t" -not -path '*/_deps/*' | head -n1)
+            echo "=== $t ($exe) ==="
+            lipo -archs "$exe" || true
+            if ! "$exe"; then echo "::error::$t failed"; failed=1; fi
+          done
+          exit $failed
+
+      - name: Build VST3, AU and Standalone
+        run: cmake --build build --target Looper_VST3 Looper_AU Looper_Standalone --parallel
+
+      - name: Locate bundles
+        id: locate
+        run: |
+          find_bundle() {
+            find build -name "$1" -type d -not -path '*/_deps/*' | head -n1
+          }
+          vst3=$(find_bundle Looper.vst3)
+          au=$(find_bundle Looper.component)
+          app=$(find_bundle Looper.app)
+          echo "VST3: $vst3"; echo "AU: $au"; echo "App: $app"
+          [ -n "$vst3" ] || { echo "::error::Looper.vst3 not found"; exit 1; }
+          [ -n "$au" ]   || { echo "::error::Looper.component not found"; exit 1; }
+          {
+            echo "vst3=$vst3"
+            echo "au=$au"
+            echo "app=$app"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Ad-hoc sign bundles
+        run: |
+          for b in "${{ steps.locate.outputs.vst3 }}" "${{ steps.locate.outputs.au }}" "${{ steps.locate.outputs.app }}"; do
+            [ -n "$b" ] || continue
+            codesign --force --deep -s - "$b"
+            codesign --verify --deep --strict --verbose=2 "$b"
+            bin="$b/Contents/MacOS/Looper"
+            [ -f "$bin" ] && { echo "$bin:"; lipo -archs "$bin"; }
+          done
+
+      - name: Validate AU (auval)
+        id: auval
+        continue-on-error: true
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          rm -rf ~/Library/Audio/Plug-Ins/Components/Looper.component
+          cp -R "${{ steps.locate.outputs.au }}" ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -a | grep -i -E "$AU_MANU|Looper" || true
+          set -o pipefail
+          auval -strict -v "$AU_TYPE" "$AU_SUBTYPE" "$AU_MANU" 2>&1 | tee auval.log
+          tail -n 5 auval.log
+
+      - name: Report auval result
+        if: always()
+        run: |
+          echo "auval outcome: ${{ steps.auval.outcome }}"
+          if [ "${{ steps.auval.outcome }}" = "success" ]; then
+            echo "### auval: PASS (\`$AU_TYPE $AU_SUBTYPE $AU_MANU\`)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::auval validation did not pass (${{ steps.auval.outcome }})"
+            echo "### auval: ${{ steps.auval.outcome }} (\`$AU_TYPE $AU_SUBTYPE $AU_MANU\`)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          [ -f auval.log ] && { echo '```'; tail -n 20 auval.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          ditto -c -k --keepParent "${{ steps.locate.outputs.vst3 }}" dist/Looper-macos-universal-vst3.zip
+          ditto -c -k --keepParent "${{ steps.locate.outputs.au }}"   dist/Looper-macos-universal-au.zip
+          if [ -n "${{ steps.locate.outputs.app }}" ]; then
+            ditto -c -k --keepParent "${{ steps.locate.outputs.app }}" dist/Looper-macos-universal-standalone.zip
+          fi
+          cat > dist/INSTALL.txt <<'TXT'
+          Looper for macOS (universal: Apple Silicon + Intel, macOS 11.0+)
+          =================================================================
+
+          These builds are ad-hoc signed only (not notarized), so macOS will
+          quarantine them after download. Remove the quarantine flag after copying.
+
+          VST3
+            unzip Looper-macos-universal-vst3.zip
+            mkdir -p ~/Library/Audio/Plug-Ins/VST3
+            cp -R Looper.vst3 ~/Library/Audio/Plug-Ins/VST3/
+            xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/Looper.vst3
+
+          Audio Unit (AU instrument)
+            unzip Looper-macos-universal-au.zip
+            mkdir -p ~/Library/Audio/Plug-Ins/Components
+            cp -R Looper.component ~/Library/Audio/Plug-Ins/Components/
+            xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Looper.component
+            killall -9 AudioComponentRegistrar 2>/dev/null || true
+
+          Standalone app (optional)
+            unzip Looper-macos-universal-standalone.zip
+            cp -R Looper.app /Applications/
+            xattr -dr com.apple.quarantine /Applications/Looper.app
+
+          Then rescan plug-ins or restart your DAW.
+            Logic Pro: Settings > Plug-in Manager > select Looper > "Reset & Rescan Selection".
+            Check with: auval -v aumu LoAp Loop
+          TXT
+          sed -i '' -e 's/^          //' dist/INSTALL.txt
+          ls -la dist
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: Looper-macos-universal
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
