@@ -7,6 +7,7 @@
 #include "../MidiRouter/MidiRouter.h"
 #include "../SamplePool/SamplePool.h"
 #include "../PatchStore/PatchStore.h"
+#include "../PatchStore/SampleRelocator.h"
 #include "../Prefs/SessionPrefs.h"
 #include "../VoiceEngine/VoiceEngine.h"
 
@@ -95,6 +96,21 @@ public:
     void setPatchName(const juce::String& name) { patchName_ = name; }
 
     const std::vector<std::string>& offlineSampleIds() const { return offlineSampleIds_; }
+    bool hasMissingSamples() const { return ! offlineSampleIds_.empty(); }
+
+    /** Message-thread: offline samples (id + last known absolute path) for the Relocate screen. */
+    std::vector<looper::MissingSample> missingSamples() const;
+
+    /**
+     * Message-thread: point sample `sampleId` at `newFile`, decode it into the pool
+     * (zones referencing it become audible immediately) and mark the patch dirty so
+     * the next save writes the new relative path. Returns false (with error) if the
+     * file could not be decoded; the sample then stays offline.
+     */
+    bool relocateSample(const std::string& sampleId, const juce::File& newFile, juce::String* error = nullptr);
+
+    /** True when the in-memory instrument differs from the last saved/loaded patch file. */
+    bool isPatchDirty() const { return patchDirty_; }
 
     const SessionPrefs& sessionPrefs() const { return prefs_; }
     /** Apply prefs to engine / map / APVTS defaults and remember for persistence. */
@@ -125,6 +141,7 @@ private:
     juce::String lastPatchPath_;
     juce::String patchName_ { "Untitled" };
     std::vector<std::string> offlineSampleIds_;
+    bool patchDirty_ = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LooperAudioProcessor)
 };

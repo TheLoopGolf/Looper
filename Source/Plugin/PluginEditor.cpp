@@ -1,15 +1,18 @@
 #include "PluginEditor.h"
 
 LooperAudioProcessorEditor::LooperAudioProcessorEditor (LooperAudioProcessor& p)
-    : AudioProcessorEditor (&p), processorRef_ (p), mainView_ (p), settingsView_ (p)
+    : AudioProcessorEditor (&p), processorRef_ (p), mainView_ (p), settingsView_ (p), relocateView_ (p)
 {
     setLookAndFeel (&lookAndFeel_);
     addAndMakeVisible (mainView_);
     addChildComponent (reviewMapView_);
     addChildComponent (settingsView_);
+    addChildComponent (relocateView_);
     mainView_.setImportCallback ([this] (const juce::Array<juce::File>& files) { handleImport (files); });
     mainView_.setReviewCallback ([this] { handleOpenReview(); });
     mainView_.setSettingsCallback ([this] { handleOpenSettings(); });
+    mainView_.setRelocateCallback ([this] { showRelocate(); });
+    relocateView_.setCloseCallback ([this] { showMain(); });
     reviewMapView_.setAcceptCallback ([this] { handleAcceptMap(); });
     reviewMapView_.setBackCallback ([this] { handleBackToPlay(); });
     settingsView_.setBackCallback ([this] { showMain(); });
@@ -32,6 +35,7 @@ void LooperAudioProcessorEditor::resized()
     mainView_.setBounds (getLocalBounds());
     reviewMapView_.setBounds (getLocalBounds());
     settingsView_.setBounds (getLocalBounds());
+    relocateView_.setBounds (getLocalBounds());
 }
 
 void LooperAudioProcessorEditor::showMain()
@@ -41,6 +45,7 @@ void LooperAudioProcessorEditor::showMain()
     mainView_.setVisible (true);
     reviewMapView_.setVisible (false);
     settingsView_.setVisible (false);
+    relocateView_.setVisible (false);
 }
 
 void LooperAudioProcessorEditor::showReview()
@@ -49,6 +54,7 @@ void LooperAudioProcessorEditor::showReview()
     mainView_.setVisible (false);
     reviewMapView_.setVisible (true);
     settingsView_.setVisible (false);
+    relocateView_.setVisible (false);
 }
 
 void LooperAudioProcessorEditor::showSettings()
@@ -58,6 +64,17 @@ void LooperAudioProcessorEditor::showSettings()
     mainView_.setVisible (false);
     reviewMapView_.setVisible (false);
     settingsView_.setVisible (true);
+    relocateView_.setVisible (false);
+}
+
+void LooperAudioProcessorEditor::showRelocate()
+{
+    screen_ = Screen::Relocate;
+    relocateView_.open();
+    mainView_.setVisible (false);
+    reviewMapView_.setVisible (false);
+    settingsView_.setVisible (false);
+    relocateView_.setVisible (true);
 }
 
 void LooperAudioProcessorEditor::handleImport (const juce::Array<juce::File>& files)

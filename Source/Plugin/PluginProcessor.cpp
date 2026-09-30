@@ -2,6 +2,8 @@
 #include "PluginEditor.h"
 #include "../Import/MapCommit.h"
 
+#include <algorithm>
+
 namespace {
 float dbToLin(float db) { return juce::Decibels::decibelsToGain(db); }
 
@@ -160,6 +162,7 @@ bool LooperAudioProcessor::acceptPendingMap()
         }
     }
     offlineSampleIds_.clear();
+    patchDirty_ = true;
     return true;
 }
 
@@ -333,6 +336,7 @@ bool LooperAudioProcessor::savePatchToFile(const juce::File& file)
     {
         lastPatchPath_ = file.getFullPathName();
         patchName_ = juce::String(patch.name);
+        patchDirty_ = false;
     }
     return ok;
 }
@@ -411,8 +415,58 @@ bool LooperAudioProcessor::loadPatchFromFile(const juce::File& file, juce::Strin
     // applyPatch re-checks existence and fills missingPathsOut / offlineSampleIds_
     const bool ok = applyPatch(loaded->patch, missingPathsOut);
     if (ok)
+    {
         lastPatchPath_ = file.getFullPathName();
+        patchDirty_ = false;
+    }
     return ok;
+}
+
+std::vector<looper::MissingSample> LooperAudioProcessor::missingSamples() const
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    std::vector<looper::MissingSample> out;
+    out.reserve(offlineSampleIds_.size());
+    for (const auto& id : offlineSampleIds_)
+    {
+        const auto it = std::find_if(userSampleRefs_.begin(), userSampleRefs_.end(),
+                                     [&](const SampleRef& r) { return r.id == id; });
+        out.push_back({ id, it != userSampleRefs_.end() ? it->path : std::string() });
+    }
+    return out;
+}
+
+bool LooperAudioProcessor::relocateSample(const std::string& sampleId, const juce::File& newFile,
+                                          juce::String* error)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    const auto it = std::find_if(userSampleRefs_.begin(), userSampleRefs_.end(),
+                                 [&](const SampleRef& r) { return r.id == sampleId; });
+    if (it == userSampleRefs_.end())
+    {
+        if (error != nullptr) *error = "Unknown sample";
+        return false;
+    }
+    if (! newFile.existsAsFile())
+    {
+        if (error != nullptr) *error = "File not found";
+        return false;
+    }
+
+    // Decodes into a fresh buffer, then swaps it into the pool under the pool lock:
+    // zones that point at this id play the new audio from the next note-on.
+    auto loaded = importController_.loadFileIntoPool(newFile, samplePool_, *it);
+    if (! loaded.ok)
+    {
+        if (error != nullptr) *error = loaded.error.isNotEmpty() ? loaded.error : juce::String("Could not decode");
+        return false;
+    }
+
+    *it = loaded.ref; // new absolute path; PatchStore::save rewrites it relative to the patch
+    offlineSampleIds_.erase(std::remove(offlineSampleIds_.begin(), offlineSampleIds_.end(), sampleId),
+                            offlineSampleIds_.end());
+    patchDirty_ = true;
+    return true;
 }
 
 void LooperAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
@@ -475,6 +529,7 @@ void LooperAudioProcessor::setStateInformation(const void* data, int sizeInBytes
                 PatchStore::resolveSamplePaths(*patch, dir);
             }
             applyPatch(*patch, nullptr);
+            patchDirty_ = false;
         }
     }
 

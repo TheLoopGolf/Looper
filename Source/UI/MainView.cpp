@@ -43,6 +43,14 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor)
     addAndMakeVisible (saveBtn_);
     addAndMakeVisible (settingsBtn_);
 
+    // Missing-samples banner: sand "bunker" chip that opens the Relocate screen
+    // Dark brass tone -> LooperLookAndFeel draws a raised chip with a brass outline
+    missingBanner_.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff3a3212));
+    missingBanner_.setColour (juce::TextButton::textColourOffId, Palette::sand());
+    missingBanner_.setTooltip ("Some sample files were not found. Click to relocate them.");
+    missingBanner_.onClick = [this] { if (onRelocate_) onRelocate_(); };
+    addChildComponent (missingBanner_);
+
     dropHint_.setJustificationType (juce::Justification::centred);
     dropHint_.setColour (juce::Label::textColourId, Palette::text());
     dropHint_.setFont (juce::Font (juce::FontOptions (16.0f)));
@@ -159,14 +167,19 @@ void MainView::refreshFromProcessor()
         samplesTitle_.setVisible (true);
         sampleList_.setVisible (true);
         juce::String st;
-        st << processor_.patchName() << " · " << processor_.zoneCount() << " zones · "
+        const auto dot = juce::String::fromUTF8 (" \xc2\xb7 "); // " · "
+        st << processor_.patchName() << dot << processor_.zoneCount() << " zones" << dot
            << processor_.rootCount() << " roots";
         const int rr = processor_.rrDepth();
         if (rr > 0)
-            st << " · RR x " << rr;
-        if (! processor_.offlineSampleIds().empty())
-            st << " · " << (int) processor_.offlineSampleIds().size() << " offline";
+            st << dot << "RR x " << rr;
+        if (processor_.isPatchDirty())
+            st << dot << "unsaved";
         status_.setText (st, juce::dontSendNotification);
+        const int missing = (int) processor_.offlineSampleIds().size();
+        missingBanner_.setVisible (missing > 0);
+        missingBanner_.setButtonText (juce::String (missing) + (missing == 1 ? " sample missing" : " samples missing")
+                                      + juce::String::fromUTF8 (" \xc2\xb7 Relocate\xe2\x80\xa6"));
         sampleNames_.clear();
         for (const auto& ref : processor_.userSampleRefs())
         {
@@ -175,7 +188,7 @@ void MainView::refreshFromProcessor()
                                             processor_.offlineSampleIds().end(),
                                             ref.id) != processor_.offlineSampleIds().end();
             if (offline)
-                name = "[offline] " + name;
+                name = "[missing] " + name;
             sampleNames_.add (name);
         }
         sampleList_.updateContent();
@@ -184,7 +197,8 @@ void MainView::refreshFromProcessor()
     {
         subtitle_.setText ("Drop samples to build an instrument. Mapping stays secondary.",
                            juce::dontSendNotification);
-        dropHint_.setText ("Drop a sample folder — AutoMapper builds the map.\nClick to browse · WAV / AIFF / FLAC",
+        dropHint_.setText (juce::String::fromUTF8 ("Drop a sample folder \xe2\x80\x94 AutoMapper builds the map.\n"
+                                                   "Click to browse \xc2\xb7 WAV / AIFF / FLAC"),
                            juce::dontSendNotification);
         dropHint_.setVisible (true);
         reviewBtn_.setVisible (false);
@@ -194,6 +208,7 @@ void MainView::refreshFromProcessor()
         samplesTitle_.setVisible (false);
         sampleList_.setVisible (false);
         status_.setText ({}, juce::dontSendNotification);
+        missingBanner_.setVisible (false);
         sampleNames_.clear();
         sampleList_.updateContent();
     }
@@ -336,6 +351,7 @@ void MainView::resized()
         addBtn_.setBounds ({});
         openBtn_.setBounds (getWidth() - 16 - 80 - 44, 18, 80, 28);
         saveBtn_.setBounds ({});
+        missingBanner_.setBounds ({});
         status_.setBounds ({});
         samplesTitle_.setBounds ({});
         sampleList_.setBounds ({});
@@ -350,6 +366,14 @@ void MainView::resized()
         openBtn_.setBounds (bar.removeFromLeft (72));
         bar.removeFromLeft (8);
         saveBtn_.setBounds (bar.removeFromLeft (72));
+        bar.removeFromLeft (8);
+        if (missingBanner_.isVisible())
+        {
+            missingBanner_.setBounds (bar.removeFromLeft (220));
+            bar.removeFromLeft (8);
+        }
+        else
+            missingBanner_.setBounds ({});
         status_.setBounds (bar);
         mid.removeFromTop (8);
         zoneKeyboard_.setBounds (mid.removeFromTop (88).reduced (8));
@@ -420,20 +444,6 @@ void MainView::openChooser()
     });
 }
 
-void MainView::showMissingSamplesAlert (const juce::StringArray& missing)
-{
-    if (missing.isEmpty())
-        return;
-    juce::String body = "Some sample files could not be loaded (offline). Zones are kept; relocate UI comes later.\n\n";
-    const int n = juce::jmin (12, missing.size());
-    for (int i = 0; i < n; ++i)
-        body << "• " << missing[i] << "\n";
-    if (missing.size() > n)
-        body << "… and " << (missing.size() - n) << " more";
-    juce::AlertWindow::showMessageBoxAsync (juce::MessageBoxIconType::WarningIcon,
-                                            "Missing samples", body);
-}
-
 void MainView::openPatchChooser()
 {
     patchChooser_ = std::make_unique<juce::FileChooser> (
@@ -454,7 +464,9 @@ void MainView::openPatchChooser()
             return;
         }
         refreshFromProcessor();
-        showMissingSamplesAlert (missing);
+        // Patch loaded anyway (missing zones stay silent) — go straight to Relocate.
+        if (! missing.isEmpty() && onRelocate_)
+            onRelocate_();
     });
 }
 

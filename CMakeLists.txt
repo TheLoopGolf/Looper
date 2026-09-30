@@ -46,6 +46,7 @@ endif()
 add_library(LooperPatch STATIC
     Source/PatchStore/PatchStore.cpp
     Source/Prefs/SessionPrefs.cpp
+    Source/PatchStore/SampleRelocator.cpp
 )
 target_include_directories(LooperPatch PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/Source
@@ -78,6 +79,10 @@ if(LOOPER_BUILD_TESTS)
     add_executable(SessionPrefsTests Tests/SessionPrefsTests.cpp)
     target_link_libraries(SessionPrefsTests PRIVATE LooperPatch)
     add_test(NAME SessionPrefsTests COMMAND SessionPrefsTests)
+
+    add_executable(RelocatorTests Tests/RelocatorTests.cpp)
+    target_link_libraries(RelocatorTests PRIVATE LooperPatch)
+    add_test(NAME RelocatorTests COMMAND RelocatorTests)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -132,6 +137,8 @@ if(LOOPER_BUILD_PLUGIN)
             Source/UI/ReviewMapView.h
             Source/UI/SettingsView.cpp
             Source/UI/SettingsView.h
+            Source/UI/RelocateView.cpp
+            Source/UI/RelocateView.h
             Source/UI/LooperLookAndFeel.cpp
             Source/UI/LooperLookAndFeel.h
             Source/UI/ZoneKeyboardComponent.cpp
@@ -145,6 +152,7 @@ if(LOOPER_BUILD_PLUGIN)
             Source/Filter/SvfFilter.h
             Source/MidiRouter/MidiRouter.h
             Source/PatchStore/PatchStore.h
+            Source/PatchStore/SampleRelocator.h
     )
 
     target_include_directories(Looper

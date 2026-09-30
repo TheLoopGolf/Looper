@@ -36,8 +36,9 @@ Source/
   AmpEnv/           Linear ADSR (min attack 0.1 ms)
   Filter/           Linear Simper SVF (LP/HP/BP, dual-state stereo)
   MidiRouter/       Note/CC + pitch bend (±2 st); CC1 → cutoff when target FilterCutoff
-  PatchStore/       JSON sidecar (.looper.json) — relative sample paths, schema v1
-  UI/               MainView (drop/loaded), ReviewMapView (table), SettingsView
+  PatchStore/       JSON sidecar (.looper.json) — relative sample paths, schema v1;
+                    SampleRelocator (find moved/missing samples, no JUCE)
+  UI/               MainView (drop/loaded), ReviewMapView (table), SettingsView, RelocateView
   Prefs/            SessionPrefs (global/session settings JSON)
   Import/           ImportController + MapCommit (message-thread pipeline)
   Plugin/           PluginProcessor + PluginEditor (APVTS ADSR/Volume/Filter)
@@ -47,10 +48,11 @@ Tests/
   DspVoiceTests.cpp   Hermite / AmpEnv / SVF / offline VoiceEngine
   PatchStoreTests.cpp JSON round-trip + relative paths
   SessionPrefsTests.cpp prefs serialize round-trip
+  RelocatorTests.cpp  missing-sample search: case / tail match / ambiguity / cascade / Windows / unicode
 docs/               Product, DSP, wireframes
 ```
 
-Libraries: `LooperAutoMapper` (filename map), `LooperDsp` (Hermite/AmpEnv/SamplePool/VoiceEngine/SVF, **no JUCE**), `LooperPatch` (JSON patch IO + SessionPrefs, **no JUCE**). Plugin links all three.
+Libraries: `LooperAutoMapper` (filename map), `LooperDsp` (Hermite/AmpEnv/SamplePool/VoiceEngine/SVF, **no JUCE**), `LooperPatch` (JSON patch IO + SessionPrefs + SampleRelocator, **no JUCE**). Plugin links all three.
 
 ### Automatic pitch detection
 
@@ -90,7 +92,7 @@ Samples whose filename has no note name (e.g. `Pluck_alpha.wav`) are analysed on
 | MainView empty/loaded + ReviewMapView table | **Done** |
 | Settings (Engine / Mapping / MIDI / Files / About) | **Done** |
 | Keyboard strip graphic | TODO (polish) |
-| Locate missing files (relocate UI) | TODO (offline list on load) |
+| Relocate missing samples (search folder / locate / cascade) | **Done** — see below |
 
 ---
 
@@ -115,12 +117,22 @@ Host-automatable params: **Attack / Decay / Sustain / Release / Volume / Filter 
 
 1. Import + **Accept map** so you have a user instrument (Save is enabled).
 2. Click **Save** → choose `Something.looper.json` (or `.json`). Sample paths are stored **relative to the patch file’s directory** when possible; audio is **not** embedded.
-3. Click **Open…** (available even on the empty drop screen) → pick a `.looper.json` / `.json`. Samples are decoded on the message thread into `SamplePool`; missing files are listed as **offline** (zones kept; full relocate UI later).
-4. Host project save/recall (`getStateInformation` / `setStateInformation`) embeds APVTS + a patch JSON blob. If sample paths from the previous session are still valid, buffers reload; otherwise zones stay with offline markers.
+3. Click **Open…** (available even on the empty drop screen) → pick a `.looper.json` / `.json`. Samples are decoded on the message thread into `SamplePool`; if any sample files are missing the patch still loads (those zones stay **silent**) and the **Relocate** screen opens.
+4. Host project save/recall (`getStateInformation` / `setStateInformation`) embeds APVTS + a patch JSON blob. If sample paths from the previous session are still valid, buffers reload; otherwise the zones stay silent and the main view shows a **“N samples missing · Relocate…”** banner.
 
 **Format sketch (schemaVersion 1):** `name`, `patchRoot`, `samples[]` (`id`, `path`, …), `map` (globals + `zones[]`), optional `params` (APVTS float snapshot).
 
-**Limitations (v1):** no sample embedding; no relocate/browse-for-missing UI yet; streaming long files still TODO.
+### Relocate missing samples
+
+When sample files have moved, Looper still loads the patch (offline zones are silent) and lists the missing files on the **Relocate** screen (sample, original path, status). Open it from the sand **“N samples missing · Relocate…”** banner on the main view.
+
+- **Search folder…** — pick a folder; it is scanned recursively (background thread) and every missing file is matched by **file name, case-insensitive**. If several files share the name, the one whose trailing sub-path best matches the original (e.g. `Grand Piano/Soft/C4.wav`) wins; a tie is relinked to a deterministic best guess and marked **ambiguous** (sand; hover for the other candidates). Ties are broken by sibling consensus when other samples from the same original folder were found unambiguously.
+- **Locate…** (or double-click a row) — pick one file by hand (any name). Looper then tries the rest **from the same place**: it mirrors the original folder structure around the located file (same folder, sibling folders, renamed parents), then searches that folder recursively.
+- **Skip** leaves a sample offline; **Close/Done** returns to play.
+
+Each found file is decoded and swapped in **live** (next note-on plays it) and the patch is marked **unsaved**; the next **Save** writes the new paths relative to the patch file. The matching logic lives in `Source/PatchStore/SampleRelocator.*` (std::filesystem, no JUCE) and is covered by `RelocatorTests`.
+
+**Limitations (v1):** no sample embedding; streaming long files still TODO. Relocate: case folding covers ASCII + Latin-1 letters only (no full Unicode case/normalization — e.g. NFD vs NFC names won't match); scans stop after 250 000 files / depth 32; a cascade/search never overrides a file you already relinked unless it was ambiguous.
 
 
 ## Build
@@ -133,7 +145,7 @@ JUCE is pulled via **CMake FetchContent** (not vendored). Requires CMake ≥ 3.2
 cmake -S . -B build -DLOOPER_BUILD_PLUGIN=OFF -DLOOPER_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
-# or: ./build/AutoMapperTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests
+# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests
 ```
 
 ### Full plugin (macOS / Windows recommended)
@@ -169,17 +181,17 @@ Session prefs persist in host state (`prefsJson` alongside patch). Mapping optio
 
 **Done:** drop/browse import → AutoMapper → Review map → Accept into playable map; APVTS knobs; thread-safe map swap via `shared_ptr`/`adoptMap`; Settings screen with session prefs.
 
-**Polish TODOs:** keyboard strip graphic, locate/relocate missing files UI, glide/portamento DSP, sustain pedal, MIDI learn.
+**Polish TODOs:** keyboard strip graphic, glide/portamento DSP, sustain pedal, MIDI learn.
 
 ## Next milestone
 
-Streaming sample I/O → relocate missing samples UI → optional dedicated filter envelope.
+Streaming sample I/O → optional dedicated filter envelope.
 
 ## Contributing / next steps
 
 1. Keyboard strip zone visualization per wireframes.
 2. Optional: flag filename-vs-detected pitch mismatches in Review.
-3. Relocate UI for offline samples after patch/host load.
+3. Relocate: optional file-hash verification of candidates.
 4. Parameter smoothing on continuous filter/env params; finish glide DSP.
 5. Choose LICENSE compatible with your JUCE license (GPL vs commercial).
 

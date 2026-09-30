@@ -661,6 +661,47 @@ static void testSustainPedalUpReleasesDeferred()
     CHECK(engine.activeVoiceCount() == 0);
 }
 
+static void testOfflineZoneIsSilent()
+{
+    std::cout << "testOfflineZoneIsSilent\n";
+
+    SamplePool pool;
+    pool.loadDemoSample(44100.0);
+    SampleRef stub;
+    stub.id = "offline";
+    stub.path = "/missing/C4.wav";
+    pool.addStub(stub); // metadata only: no buffer (file missing)
+
+    InstrumentMap map;
+    Zone z;
+    z.sampleId = "offline";
+    z.rootKey = 60;
+    z.keyLow = 0;
+    z.keyHigh = 127;
+    map.zones.push_back(z);
+
+    VoiceEngine engine;
+    engine.setSamplePool(&pool);
+    engine.setMap(&map);
+    engine.setSampleRate(44100.0);
+    engine.setMasterGainLin(1.0f);
+
+    engine.noteOn(60, 100, 1);
+    CHECK(engine.activeVoiceCount() == 0);
+
+    std::vector<float> left(256, 0.0f), right(256, 0.0f);
+    engine.processBlock(left.data(), right.data(), 256);
+    double energy = 0.0;
+    for (size_t i = 0; i < left.size(); ++i)
+        energy += static_cast<double>(left[i] * left[i] + right[i] * right[i]);
+    CHECK(energy == 0.0);
+
+    // Once relocated (buffer installed) the same zone plays.
+    pool.setBuffer("offline", makeDemoToneBuffer(44100.0));
+    engine.noteOn(60, 100, 1);
+    CHECK(engine.activeVoiceCount() == 1);
+}
+
 int main()
 {
     testHermiteKnownVector();
@@ -678,6 +719,7 @@ int main()
     testGlideLegatoBetweenOldAndNew();
     testSustainPedalDefersNoteOff();
     testSustainPedalUpReleasesDeferred();
+    testOfflineZoneIsSilent();
 
     std::cout << "\nPassed: " << g_passed << "  Failed: " << g_failed << "\n";
     return g_failed == 0 ? 0 : 1;

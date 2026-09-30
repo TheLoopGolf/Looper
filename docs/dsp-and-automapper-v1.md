@@ -257,7 +257,7 @@ Per-zone params are **not** all host automatable in v1 (edited in map UI, stored
 
 ## 6. Edge cases & correctness
 
-- Sample file missing on load → mark offline; keep zone; UI “locate…”
+- Sample file missing on load → mark offline; keep zone (silent — no demo-tone substitute); Relocate screen (search folder / locate / cascade), see `docs/relocate-missing-samples.md`
 - Host SR change mid-flight → update ratios; streaming reopens as needed
 - Offline bounce / huge blocks → engine must be block-size agnostic
 - 0-length or corrupt file → skip with warning in AutoMapper

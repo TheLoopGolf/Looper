@@ -378,10 +378,13 @@ void VoiceEngine::noteOn(int note, int velocity, int channel)
         zone = *z;
         if (pool_)
             buffer = pool_->getBuffer(zone.sampleId);
+        // Offline zone (sample file missing, awaiting relocation): stay silent rather
+        // than substituting the demo tone.
+        if (!buffer && zone.sampleId != kDemoSampleId)
+            return;
     }
 
-    // Fallback: demo sample at root 60 when no map/zones or missing buffer
-    if (!buffer)
+    // Fallback: demo sample at root 60 when no map/zones match
     {
         zone = makeDemoZone();
         zone.rootKey = 60;

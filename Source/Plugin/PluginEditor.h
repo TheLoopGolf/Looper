@@ -4,6 +4,7 @@
 #include "../UI/MainView.h"
 #include "../UI/ReviewMapView.h"
 #include "../UI/SettingsView.h"
+#include "../UI/RelocateView.h"
 #include "../UI/LooperLookAndFeel.h"
 
 class LooperAudioProcessorEditor : public juce::AudioProcessorEditor
@@ -16,6 +17,7 @@ public:
     void showMain();
     void showReview();
     void showSettings();
+    void showRelocate();
 
 private:
     void handleImport (const juce::Array<juce::File>& files);
@@ -29,7 +31,8 @@ private:
     looper::MainView mainView_;
     looper::ReviewMapView reviewMapView_;
     looper::SettingsView settingsView_;
-    enum class Screen { Main, Review, Settings };
+    looper::RelocateView relocateView_;
+    enum class Screen { Main, Review, Settings, Relocate };
     Screen screen_ = Screen::Main;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (LooperAudioProcessorEditor)
 };

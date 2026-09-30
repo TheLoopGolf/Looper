@@ -17,6 +17,7 @@ public:
     using ImportFn = std::function<void(const juce::Array<juce::File>&)>;
     using ReviewFn = std::function<void()>;
     using SettingsFn = std::function<void()>;
+    using RelocateFn = std::function<void()>;
 
     explicit MainView (LooperAudioProcessor& processor);
     ~MainView() override;
@@ -33,6 +34,8 @@ public:
     void setImportCallback (ImportFn fn) { onImport_ = std::move (fn); }
     void setReviewCallback (ReviewFn fn) { onReview_ = std::move (fn); }
     void setSettingsCallback (SettingsFn fn) { onSettings_ = std::move (fn); }
+    /** Opens the Relocate screen (banner click, or automatically after loading a patch with missing files). */
+    void setRelocateCallback (RelocateFn fn) { onRelocate_ = std::move (fn); }
     void refreshFromProcessor();
 
 private:
@@ -42,13 +45,13 @@ private:
     void openChooser();
     void openPatchChooser();
     void savePatchChooser();
-    void showMissingSamplesAlert (const juce::StringArray& missing);
     void syncZoneKeyboard();
 
     LooperAudioProcessor& processor_;
     ImportFn onImport_;
     ReviewFn onReview_;
     SettingsFn onSettings_;
+    RelocateFn onRelocate_;
 
     LooperLookAndFeel lookAndFeel_;
 
@@ -56,9 +59,10 @@ private:
     juce::Label ampTitle_, filterTitle_;
     juce::TextButton reviewBtn_ { "Review map" };
     juce::TextButton addBtn_ { "+ Samples" };
-    juce::TextButton openBtn_ { "Open…" };
+    juce::TextButton openBtn_ { juce::String::fromUTF8 ("Open\xe2\x80\xa6") };
     juce::TextButton saveBtn_ { "Save" };
-    juce::TextButton settingsBtn_ { "⚙" };
+    juce::TextButton settingsBtn_ { juce::String::fromUTF8 ("\xe2\x9a\x99") }; // gear
+    juce::TextButton missingBanner_;
 
     ZoneKeyboardComponent zoneKeyboard_;
 
