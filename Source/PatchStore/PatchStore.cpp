@@ -517,6 +517,8 @@ void writeMap(JsonWriter& w, const InstrumentMap& map)
     w.stringVal(PatchStore::velCurveToString(map.velCurve));
     w.key("modWheelTarget");
     w.stringVal(PatchStore::modWheelTargetToString(map.modWheelTarget));
+    w.key("roundRobinMode");
+    w.stringVal(PatchStore::roundRobinModeToString(map.rrMode));
     w.key("zones");
     w.beginArray();
     for (const auto& z : map.zones)
@@ -576,6 +578,11 @@ InstrumentMap readMap(const JsonValue& v)
         if (auto s = x->asString())
             if (auto t = PatchStore::modWheelTargetFromString(*s))
                 map.modWheelTarget = *t;
+    // Added after schema v1 shipped: absent or unknown -> Cycle (the v1 behaviour).
+    if (auto* x = v.find("roundRobinMode"))
+        if (auto s = x->asString())
+            if (auto m = PatchStore::roundRobinModeFromString(*s))
+                map.rrMode = *m;
     if (auto* zones = v.find("zones"); zones && zones->type == JsonValue::Type::Array)
         for (const auto& zv : zones->a)
             map.zones.push_back(readZone(zv));
@@ -672,6 +679,18 @@ std::optional<ModWheelTarget> PatchStore::modWheelTargetFromString(const std::st
 {
     if (s == "FilterCutoff" || s == "filterCutoff") return ModWheelTarget::FilterCutoff;
     if (s == "Volume" || s == "volume") return ModWheelTarget::Volume;
+    return std::nullopt;
+}
+
+std::string PatchStore::roundRobinModeToString(RoundRobinMode m)
+{
+    return m == RoundRobinMode::Random ? "random" : "cycle";
+}
+
+std::optional<RoundRobinMode> PatchStore::roundRobinModeFromString(const std::string& s)
+{
+    if (s == "cycle" || s == "Cycle") return RoundRobinMode::Cycle;
+    if (s == "random" || s == "Random") return RoundRobinMode::Random;
     return std::nullopt;
 }
 

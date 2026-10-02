@@ -4,11 +4,13 @@
 #include "../Filter/SvfFilter.h"
 #include "../InstrumentMap/InstrumentMap.h"
 #include "../SamplePool/SamplePool.h"
+#include "FastRng.h"
 
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace looper {
@@ -51,7 +53,7 @@ struct FilterParams
 /**
  * Polyphonic voice engine: Hermite resample + AmpEnv ADSR + per-voice SVF.
  * Filter envelope reuses amp ADSR (cutoff *= 2^(envAmount * env)).
- * Zone pick: velocity layers + round-robin cycle per rrGroup.
+ * Zone pick: velocity layers + round-robin per rrGroup (Cycle or Random, see RoundRobinMode).
  * Legato portamento when InstrumentMap.glideMs > 0; CC64 sustain via setSustainPedal.
  */
 class VoiceEngine
@@ -75,7 +77,22 @@ public:
     /** Call when map zones changed in-place (same pointer). Clears RR counters. */
     void mapChanged();
 
+    /** Resets RR cycle counters and Random "last played" memory. Message thread. */
     void clearRrCounters();
+
+    /**
+     * Round-robin mode for groups with 2+ alternates. Cycle (default) is the v1 behaviour.
+     * Lock-free (relaxed atomic): may be called from the audio thread every block.
+     * The engine does not read InstrumentMap::rrMode; the host/processor pushes it here.
+     */
+    void setRoundRobinMode(RoundRobinMode mode) noexcept { rrMode_.store(mode, std::memory_order_relaxed); }
+    RoundRobinMode roundRobinMode() const noexcept { return rrMode_.load(std::memory_order_relaxed); }
+
+    /** Re-seed the Random-mode PRNG (tests: deterministic sequences). Not audio-thread safe. */
+    void setRandomSeed(uint64_t seed) noexcept { rng_.seedWith(seed); }
+
+    /** Alternates beyond this many in one RR group are ignored (stack scratch, no allocation). */
+    static constexpr size_t kMaxRrAlternates = 128;
 
     void setSamplePool(SamplePool* pool) { pool_ = pool; }
 
@@ -118,7 +135,10 @@ public:
     /**
      * Velocity-layer + round-robin zone selection.
      * Returns nullptr if no zone matches (caller may use demo fallback).
-     * Advances RR cycle counters for non-zero rrGroups when a group has >1 zone.
+     * Group = zones matching note/velocity that share the first match's non-zero rrGroup.
+     * Cycle: advances the rrGroup's counter (rrIndex order). Random: uniform pick that never
+     * repeats the group's previous alternate (2+ alternates). A 1-zone group just plays.
+     * Real-time safe: no allocation, no locks.
      */
     const Zone* selectZone(int note, int velocity);
 
@@ -148,8 +168,25 @@ private:
     uint64_t ageCounter_ = 0;
     bool sustainPedal_ = false;
 
-    /** Per-rrGroup cycle counters (rrGroup == 0 unused). */
-    std::unordered_map<int, uint32_t> rrCounters_;
+    /**
+     * Fixed-size open-addressing table (no audio-thread allocation).
+     * key (rrGroup, lead = -1): Cycle counter per rrGroup (v1 semantics).
+     * key (rrGroup, lead = lowest map index of the group's alternates): last played zone,
+     * i.e. per keyzone / velocity-layer group, used by Random to avoid back-to-back repeats.
+     */
+    struct RrSlot
+    {
+        bool used = false;
+        int32_t group = 0;
+        int32_t lead = -1;
+        uint32_t counter = 0;
+        int32_t lastZone = -1;
+    };
+    static constexpr size_t kRrSlots = 1024; // power of two
+    RrSlot& rrSlot(int group, int lead) noexcept;
+    std::array<RrSlot, kRrSlots> rrSlots_ {};
+    std::atomic<RoundRobinMode> rrMode_ { RoundRobinMode::Cycle };
+    FastRng rng_;
 };
 
 } // namespace looper

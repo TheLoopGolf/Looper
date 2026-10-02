@@ -1,6 +1,7 @@
 #include "MainView.h"
 #include "../Plugin/PluginProcessor.h"
 #include "../Import/ImportController.h"
+#include "Glyphs.h"
 #include <algorithm>
 
 namespace looper {
@@ -26,11 +27,12 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor)
     status_.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (status_);
 
+    openBtn_.setButtonText ("Open" + glyph::ellipsis());
     styleSecondaryButton (reviewBtn_);
     styleSecondaryButton (addBtn_);
     styleBrassButton (openBtn_);
     styleBrassButton (saveBtn_);
-    styleSecondaryButton (settingsBtn_);
+    settingsBtn_.setColour (juce::TextButton::buttonColourId, Palette::bgRaised());
     settingsBtn_.setTooltip ("Settings / preferences");
     reviewBtn_.onClick = [this] { if (onReview_) onReview_(); };
     addBtn_.onClick = [this] { openChooser(); };
@@ -57,6 +59,16 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor)
     addAndMakeVisible (dropHint_);
 
     addAndMakeVisible (zoneKeyboard_);
+
+    rrLabel_.setText ("ROUND ROBIN", juce::dontSendNotification);
+    rrLabel_.setFont (juce::Font (juce::FontOptions (10.0f)));
+    rrLabel_.setColour (juce::Label::textColourId, Palette::muted());
+    rrLabel_.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (rrLabel_);
+    if (auto* rrParam = processor_.apvts().getParameter ("rrMode"))
+        rrToggle_.attachToParameter (*rrParam);
+    rrToggle_.setTitle ("Round robin mode");
+    addAndMakeVisible (rrToggle_);
 
     samplesTitle_.setText ("SAMPLES", juce::dontSendNotification);
     samplesTitle_.setFont (juce::Font (juce::FontOptions (11.0f)));
@@ -167,7 +179,7 @@ void MainView::refreshFromProcessor()
         samplesTitle_.setVisible (true);
         sampleList_.setVisible (true);
         juce::String st;
-        const auto dot = juce::String::fromUTF8 (" \xc2\xb7 "); // " · "
+        const auto dot = glyph::dotSep();
         st << processor_.patchName() << dot << processor_.zoneCount() << " zones" << dot
            << processor_.rootCount() << " roots";
         const int rr = processor_.rrDepth();
@@ -179,7 +191,7 @@ void MainView::refreshFromProcessor()
         const int missing = (int) processor_.offlineSampleIds().size();
         missingBanner_.setVisible (missing > 0);
         missingBanner_.setButtonText (juce::String (missing) + (missing == 1 ? " sample missing" : " samples missing")
-                                      + juce::String::fromUTF8 (" \xc2\xb7 Relocate\xe2\x80\xa6"));
+                                      + dot + "Relocate" + glyph::ellipsis());
         sampleNames_.clear();
         for (const auto& ref : processor_.userSampleRefs())
         {
@@ -192,13 +204,22 @@ void MainView::refreshFromProcessor()
             sampleNames_.add (name);
         }
         sampleList_.updateContent();
+
+        rrLabel_.setVisible (true);
+        rrToggle_.setVisible (true);
+        const bool hasRr = rr > 0;
+        rrToggle_.setSubdued (! hasRr);
+        rrToggle_.setTooltip (juce::String ("Round-robin: Cycle plays alternates in order; Random picks a different "
+                                            "one each hit (never the same twice in a row). Saved with the patch, "
+                                            "host-automatable.")
+                              + (hasRr ? juce::String() : juce::String (" This patch has no round-robin alternates yet.")));
     }
     else
     {
         subtitle_.setText ("Drop samples to build an instrument. Mapping stays secondary.",
                            juce::dontSendNotification);
-        dropHint_.setText (juce::String::fromUTF8 ("Drop a sample folder \xe2\x80\x94 AutoMapper builds the map.\n"
-                                                   "Click to browse \xc2\xb7 WAV / AIFF / FLAC"),
+        dropHint_.setText (glyph::spaced ("Drop a sample folder", glyph::emDash(), "AutoMapper builds the map.\n")
+                               + glyph::spaced ("Click to browse", glyph::middleDot(), "WAV / AIFF / FLAC"),
                            juce::dontSendNotification);
         dropHint_.setVisible (true);
         reviewBtn_.setVisible (false);
@@ -209,6 +230,8 @@ void MainView::refreshFromProcessor()
         sampleList_.setVisible (false);
         status_.setText ({}, juce::dontSendNotification);
         missingBanner_.setVisible (false);
+        rrLabel_.setVisible (false);
+        rrToggle_.setVisible (false);
         sampleNames_.clear();
         sampleList_.updateContent();
     }
@@ -355,6 +378,8 @@ void MainView::resized()
         status_.setBounds ({});
         samplesTitle_.setBounds ({});
         sampleList_.setBounds ({});
+        rrLabel_.setBounds ({});
+        rrToggle_.setBounds ({});
     }
     else
     {
@@ -377,7 +402,12 @@ void MainView::resized()
         status_.setBounds (bar);
         mid.removeFromTop (8);
         zoneKeyboard_.setBounds (mid.removeFromTop (88).reduced (8));
-        samplesTitle_.setBounds (mid.removeFromTop (22).reduced (10, 0));
+        // SAMPLES card header: title left, round-robin segmented control right
+        auto samplesHeader = mid.removeFromTop (34).withTrimmedTop (8).reduced (12, 1);
+        rrToggle_.setBounds (samplesHeader.removeFromRight (148));
+        samplesHeader.removeFromRight (8);
+        rrLabel_.setBounds (samplesHeader.removeFromRight (90));
+        samplesTitle_.setBounds (samplesHeader);
         sampleList_.setBounds (mid.reduced (10, 6));
         dropHint_.setBounds ({});
     }
@@ -464,7 +494,7 @@ void MainView::openPatchChooser()
             return;
         }
         refreshFromProcessor();
-        // Patch loaded anyway (missing zones stay silent) — go straight to Relocate.
+        // Patch loaded anyway (missing zones stay silent) - go straight to Relocate.
         if (! missing.isEmpty() && onRelocate_)
             onRelocate_();
     });

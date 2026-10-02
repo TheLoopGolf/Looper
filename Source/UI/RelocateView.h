@@ -16,7 +16,7 @@ namespace looper {
 
 /**
  * "Relocate missing samples" screen (golf theme, same chrome as Review / Settings).
- * Lists offline samples and offers Search folder… / Locate… / Skip. Every file that
+ * Lists offline samples and offers Search folder... / Locate... / Skip. Every file that
  * is found is relinked immediately (audio reloads live, patch marked dirty).
  * Folder scans run on a background thread; results are applied on the message thread.
  */
@@ -72,8 +72,8 @@ private:
     LooperLookAndFeel lookAndFeel_;
 
     juce::Label brand_, brandSub_, title_, summary_, footer_;
-    juce::TextButton searchBtn_ { juce::String::fromUTF8 ("Search folder\xe2\x80\xa6") };
-    juce::TextButton locateBtn_ { juce::String::fromUTF8 ("Locate\xe2\x80\xa6") };
+    juce::TextButton searchBtn_; // "Search folder..." / "Locate..." (ellipsis glyph set in the constructor)
+    juce::TextButton locateBtn_;
     juce::TextButton skipBtn_ { "Skip" };
     juce::TextButton closeBtn_ { "Close" };
     juce::TableListBox table_ { {}, this };

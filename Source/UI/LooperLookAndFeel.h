@@ -4,7 +4,7 @@
 
 namespace looper {
 
-/** Fairway-night palette — Loop Audio Lab / The Loop Golf. */
+/** Fairway-night palette - Loop Audio Lab / The Loop Golf. */
 namespace Palette
 {
 inline juce::Colour bg()          { return juce::Colour (0xff0a1610); }

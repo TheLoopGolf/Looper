@@ -83,6 +83,17 @@ if(LOOPER_BUILD_TESTS)
     add_executable(RelocatorTests Tests/RelocatorTests.cpp)
     target_link_libraries(RelocatorTests PRIVATE LooperPatch)
     add_test(NAME RelocatorTests COMMAND RelocatorTests)
+
+    # Round-robin Cycle / Random selection, RT safety, patch field round trip
+    add_executable(RoundRobinTests Tests/RoundRobinTests.cpp)
+    target_link_libraries(RoundRobinTests PRIVATE LooperDsp LooperPatch)
+    add_test(NAME RoundRobinTests COMMAND RoundRobinTests)
+
+    # Mojibake guard: non-ASCII UI text must go through Source/UI/Glyphs.h
+    add_executable(SourceEncodingTests Tests/SourceEncodingTests.cpp)
+    target_compile_definitions(SourceEncodingTests PRIVATE
+        LOOPER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Source")
+    add_test(NAME SourceEncodingTests COMMAND SourceEncodingTests)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -143,11 +154,15 @@ if(LOOPER_BUILD_PLUGIN)
             Source/UI/LooperLookAndFeel.h
             Source/UI/ZoneKeyboardComponent.cpp
             Source/UI/ZoneKeyboardComponent.h
+            Source/UI/LooperControls.cpp
+            Source/UI/LooperControls.h
+            Source/UI/Glyphs.h
             Source/Prefs/SessionPrefs.h
             Source/SamplePool/SamplePool.h
             Source/InstrumentMap/InstrumentMap.h
             Source/VoiceEngine/VoiceEngine.h
             Source/VoiceEngine/Hermite.h
+            Source/VoiceEngine/FastRng.h
             Source/AmpEnv/AmpEnv.h
             Source/Filter/SvfFilter.h
             Source/MidiRouter/MidiRouter.h

@@ -70,7 +70,7 @@ public:
     std::vector<looper::ZoneKeySpan> getZoneKeySpans() const;
     const std::vector<SampleRef>& userSampleRefs() const { return userSampleRefs_; }
 
-    /** Message-thread: decode + AutoMapper → pending review. */
+    /** Message-thread: decode + AutoMapper -> pending review. */
     bool importAudioFiles(const juce::Array<juce::File>& filesOrFolders);
     bool acceptPendingMap();
     void discardPendingMap();
@@ -111,6 +111,11 @@ public:
 
     /** True when the in-memory instrument differs from the last saved/loaded patch file. */
     bool isPatchDirty() const { return patchDirty_; }
+
+    /** Round-robin mode from the host-automatable "rrMode" parameter (Cycle / Random). */
+    looper::RoundRobinMode currentRoundRobinMode() const;
+    /** Message thread: set "rrMode" (notifies host; saved with the patch). */
+    void setRoundRobinMode(looper::RoundRobinMode mode);
 
     const SessionPrefs& sessionPrefs() const { return prefs_; }
     /** Apply prefs to engine / map / APVTS defaults and remember for persistence. */

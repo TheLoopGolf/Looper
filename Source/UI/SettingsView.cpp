@@ -1,16 +1,14 @@
 #include "SettingsView.h"
+#include "Glyphs.h"
 #include "LooperLookAndFeel.h"
 #include "../Plugin/PluginProcessor.h"
 
 namespace looper {
 namespace {
-juce::Colour kBg()      { return Palette::bg(); }
 juce::Colour kPanel()   { return Palette::bgRaised(); }
-juce::Colour kBorder()  { return Palette::border(); }
 juce::Colour kAccent()  { return Palette::fairway(); }
 juce::Colour kText()    { return Palette::text(); }
 juce::Colour kMuted()   { return Palette::muted(); }
-juce::Colour kNavSel()  { return Palette::fairwayDim().withAlpha (0.35f); }
 } // namespace
 
 void SettingsView::styleCombo(juce::ComboBox& c)
@@ -40,10 +38,12 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     subtitle_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(subtitle_);
 
-    chromeHint_.setText("Preferences · applies to new maps & this session", juce::dontSendNotification);
+    chromeHint_.setText(glyph::spaced("Preferences", glyph::middleDot(), "applies to new maps & this session"),
+                        juce::dontSendNotification);
     chromeHint_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(chromeHint_);
 
+    backBtn_.setButtonText(glyph::arrowLeft() + " Back to play");
     backBtn_.setColour(juce::TextButton::buttonColourId, Palette::bgRaised());
     backBtn_.setColour(juce::TextButton::textColourOffId, Palette::text());
     backBtn_.onClick = [this] { if (onBack_) onBack_(); };
@@ -93,7 +93,7 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     interpBox_.setItemEnabled(2, false);
     interpBox_.setSelectedId(1, juce::dontSendNotification);
 
-    glideBox_.addItem("Off · 0 ms", 1);
+    glideBox_.addItem(glyph::spaced("Off", glyph::middleDot(), "0 ms"), 1);
     glideBox_.addItem("10 ms", 2);
     glideBox_.addItem("25 ms", 3);
     glideBox_.addItem("50 ms", 4);
@@ -111,7 +111,7 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     filterBox_.onChange = [this] { applyEngineFromUi(); };
 
     initRow(engineRows_[0], "Polyphony", "Voice steal: quietest releasing, then oldest", &polyBox_);
-    initRow(engineRows_[1], "Interpolation", "v1 default — higher quality sinc later", &interpBox_);
+    initRow(engineRows_[1], "Interpolation", glyph::spaced("v1 default", glyph::emDash(), "higher quality sinc later"), &interpBox_);
     initRow(engineRows_[2], "Glide", "Legato portamento when enabled", &glideBox_);
     initRow(engineRows_[3], "Master soft-clip", "Optional ceiling when stacking many voices", &softClipBox_);
     initRow(engineRows_[4], "Default filter type", "Per-patch override still on main view", &filterBox_);
@@ -121,14 +121,16 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     midCBox_.setSelectedId(1, juce::dontSendNotification);
     // locked for v1
 
-    spanBox_.addItem("Full keyboard 0–127", 1);
+    spanBox_.addItem("Full keyboard 0" + glyph::enDash() + "127", 1);
     spanBox_.addItem("Natural span only", 2);
     spanBox_.onChange = [this] { applyMappingFromUi(); };
 
+    // Per-patch + host-automatable: bound to APVTS "rrMode" (same parameter as the main view's
+    // Cycle | Random control), so it is saved with the patch rather than in session prefs.
     rrBox_.addItem("Cycle", 1);
-    rrBox_.addItem("Random (later)", 2);
-    rrBox_.setItemEnabled(2, false);
-    rrBox_.onChange = [this] { applyMappingFromUi(); };
+    rrBox_.addItem("Random", 2);
+    rrAttachment_ = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment>(
+        processor_.apvts(), "rrMode", rrBox_);
 
     velBox_.addItem("Linear", 1);
     velBox_.addItem("Soft", 2);
@@ -144,24 +146,26 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
 
     initRow(mappingRows_[0], "Middle C convention", "Scientific pitch; matches most modern packs", &midCBox_);
     initRow(mappingRows_[1], "Key span", "Or natural span only (roots' neighborhood)", &spanBox_);
-    initRow(mappingRows_[2], "Round-robin mode", "Cycle or random within RR group", &rrBox_);
-    initRow(mappingRows_[3], "Velocity curve", "Soft / linear / hard — global feel", &velBox_);
+    initRow(mappingRows_[2], "Round-robin mode",
+            "Cycle in order, or random (no back-to-back repeats). Saved per patch; also on main view",
+            &rrBox_);
+    initRow(mappingRows_[3], "Velocity curve", glyph::spaced("Soft / linear / hard", glyph::emDash(), "global feel"), &velBox_);
     initRow(mappingRows_[4], "Unpitched fallback", "When filename + detect both fail", &unpitchedBox_);
     initRow(mappingRows_[5], "Open review after import", "If any warning/confidence < 0.8", &reviewBox_);
 
     // --- MIDI ---
-    bendBox_.addItem("±2 semitones", 1);
+    bendBox_.addItem(glyph::plusMinus() + "2 semitones", 1);
     bendBox_.setSelectedId(1, juce::dontSendNotification);
-    // VoiceEngine / MidiRouter fixed ±2 for v1 — store preference
+    // VoiceEngine / MidiRouter fixed +/-2 for v1 - store preference
 
     modBox_.addItem("FilterCutoff", 1);
     modBox_.addItem("Volume", 2);
     modBox_.onChange = [this] { applyMidiFromUi(); };
 
-    initRow(midiRows_[0], "Pitch bend range", "14-bit bend; VoiceEngine applies ±range", &bendBox_);
-    initRow(midiRows_[1], "Mod wheel target", "CC1 → filter cutoff or volume", &modBox_);
+    initRow(midiRows_[0], "Pitch bend range", "14-bit bend; VoiceEngine applies " + glyph::plusMinus() + "range", &bendBox_);
+    initRow(midiRows_[1], "Mod wheel target", glyph::spaced("CC1", glyph::arrowRight(), "filter cutoff or volume"), &modBox_);
     initRow(midiRows_[2], "Sustain pedal", "CC64", nullptr);
-    sustainNote_.setText("CC64 active — note-off deferred while pedal down (VoiceEngine)",
+    sustainNote_.setText(glyph::spaced("CC64 active", glyph::emDash(), "note-off deferred while pedal down (VoiceEngine)"),
                          juce::dontSendNotification);
     sustainNote_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(sustainNote_);
@@ -170,7 +174,7 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     clearLearnBtn_.setColour(juce::TextButton::buttonColourId, kPanel());
     clearLearnBtn_.setColour(juce::TextButton::textColourOffId, kText());
     clearLearnBtn_.onClick = [] {
-        // MIDI learn not implemented in v1 — stub.
+        // MIDI learn not implemented in v1 - stub.
     };
     addAndMakeVisible(clearLearnBtn_);
 
@@ -181,8 +185,9 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     addAndMakeVisible(patchPathValue_);
     filesRows_[0].extra = &patchPathValue_;
 
-    initRow(filesRows_[1], "Missing-file policy", "Offline list on load; relocate UI later", nullptr);
-    missingPolicy_.setText("Missing samples stay offline (zones kept). Relocate UI TODO.",
+    initRow(filesRows_[1], "Missing-file policy", "Patches load even when samples moved", nullptr);
+    missingPolicy_.setText("Missing samples stay silent (zones kept). Use Relocate" + glyph::ellipsis()
+                               + " on the main view to relink them.",
                            juce::dontSendNotification);
     missingPolicy_.setColour(juce::Label::textColourId, kMuted());
     addAndMakeVisible(missingPolicy_);
@@ -213,7 +218,8 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
 
     footerNote_.setColour(juce::Label::textColourId, kMuted());
     footerNote_.setFont(juce::FontOptions(11.0f));
-    footerNote_.setText("Settings are global/session · performance knobs remain on main view",
+    footerNote_.setText(glyph::spaced("Settings are global/session", glyph::middleDot(),
+                                      "performance knobs remain on main view"),
                         juce::dontSendNotification);
     addAndMakeVisible(footerNote_);
 
@@ -249,7 +255,7 @@ void SettingsView::setTab(Tab t)
             break;
         case Tab::About:
             sectionTitle_.setText("About", juce::dontSendNotification);
-            sectionSub_.setText("Looper · Loop Audio Lab", juce::dontSendNotification);
+            sectionSub_.setText(glyph::spaced("Looper", glyph::middleDot(), "Loop Audio Lab"), juce::dontSendNotification);
             break;
     }
     updateNavStyles();
@@ -323,7 +329,7 @@ void SettingsView::refreshFromProcessor()
     polyBox_.setSelectedId(p.polyphony, juce::dontSendNotification);
     if (polyBox_.getSelectedId() == 0)
     {
-        // custom value not in list — add temporarily
+        // custom value not in list - add temporarily
         polyBox_.addItem(juce::String(p.polyphony), p.polyphony);
         polyBox_.setSelectedId(p.polyphony, juce::dontSendNotification);
     }
@@ -342,7 +348,6 @@ void SettingsView::refreshFromProcessor()
 
     midCBox_.setSelectedId(1, juce::dontSendNotification);
     spanBox_.setSelectedId(p.preferFullKeyboardSpan ? 1 : 2, juce::dontSendNotification);
-    rrBox_.setSelectedId(p.cycleRrDefault ? 1 : 1, juce::dontSendNotification);
     switch (p.velCurve)
     {
         case VelCurve::Soft: velBox_.setSelectedId(2, juce::dontSendNotification); break;
@@ -385,7 +390,7 @@ void SettingsView::applyMappingFromUi()
     auto prefs = processor_.sessionPrefs();
     prefs.middleCIsC4 = true;
     prefs.preferFullKeyboardSpan = spanBox_.getSelectedId() != 2;
-    prefs.cycleRrDefault = true; // Random disabled
+    // Round-robin mode is per patch (APVTS "rrMode" via rrAttachment_), not a session pref.
     switch (velBox_.getSelectedId())
     {
         case 2: prefs.velCurve = VelCurve::Soft; break;
@@ -425,8 +430,9 @@ void SettingsView::paint(juce::Graphics& g)
     g.setColour(Palette::brass().withAlpha(0.7f));
     g.fillRect((float) header.getX(), (float) header.getBottom() - 1.0f, 72.0f, 1.0f);
 
+    // Panel starts at the chrome row (header 48 + title 24 + subtitle 20 + gap 6), matching resized()
     auto r = getLocalBounds().reduced(16);
-    r.removeFromTop(70);
+    r.removeFromTop(98);
     auto panel = r.toFloat();
     g.setColour(Palette::bgRaised());
     g.fillRoundedRectangle(panel, 12.0f);
@@ -456,7 +462,7 @@ void SettingsView::paint(juce::Graphics& g)
     g.fillRoundedRectangle(nav.getX() + 8.0f, uy, nav.getWidth() - 16.0f, 2.0f, 1.0f);
 }
 
-void SettingsView::layoutRows(juce::Rectangle<int> area, PrefRow* rows, int count)
+void SettingsView::layoutRows(juce::Rectangle<int>& area, PrefRow* rows, int count)
 {
     const int rowH = 52;
     for (int i = 0; i < count; ++i)
@@ -482,7 +488,7 @@ void SettingsView::resized()
     subtitle_.setBounds(r.removeFromTop(20));
     r.removeFromTop(6);
 
-    auto chrome = r.removeFromTop(36);
+    auto chrome = r.removeFromTop(36).reduced(8, 0);
     chromeHint_.setBounds(chrome.removeFromLeft(juce::jmax(200, chrome.getWidth() - 160)));
     backBtn_.setBounds(chrome.removeFromRight(140).reduced(2));
 

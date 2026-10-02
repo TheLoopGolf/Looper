@@ -65,6 +65,7 @@ static bool mapsEqual(const InstrumentMap& a, const InstrumentMap& b)
     if (std::fabs(a.glideMs - b.glideMs) > 1e-5f) return false;
     if (a.velCurve != b.velCurve) return false;
     if (a.modWheelTarget != b.modWheelTarget) return false;
+    if (a.rrMode != b.rrMode) return false;
     for (size_t i = 0; i < a.zones.size(); ++i)
         if (!zonesEqual(a.zones[i], b.zones[i]))
             return false;

@@ -16,7 +16,7 @@ Product & DSP design (authoritative): [`docs/PRODUCT.md`](docs/PRODUCT.md), [`do
 |-------|--------|
 | Middle C | **C4 = MIDI 60** (scientific) |
 | Key span | Full 0–127 |
-| RR mode | Cycle |
+| RR mode | Cycle (per-patch switch to **Random**, see below) |
 | Interpolation | **4-point Hermite** |
 | Glide | Off |
 | Filter env source | Amp ADSR (octave-scaled by Filter Env Amt) |
@@ -32,13 +32,14 @@ Source/
   AutoMapper/       Filename parse + zone building + YIN pitch detection (PitchDetector)
   InstrumentMap/    Zone, SampleRef, InstrumentMap types
   SamplePool/       RAM SampleBuffer pool + demo tone generator
-  VoiceEngine/      Polyphony, steal, Hermite + AmpEnv + SVF; vel layers + RR cycle
+  VoiceEngine/      Polyphony, steal, Hermite + AmpEnv + SVF; vel layers + RR (Cycle / Random, FastRng)
   AmpEnv/           Linear ADSR (min attack 0.1 ms)
   Filter/           Linear Simper SVF (LP/HP/BP, dual-state stereo)
   MidiRouter/       Note/CC + pitch bend (±2 st); CC1 → cutoff when target FilterCutoff
   PatchStore/       JSON sidecar (.looper.json) — relative sample paths, schema v1;
                     SampleRelocator (find moved/missing samples, no JUCE)
-  UI/               MainView (drop/loaded), ReviewMapView (table), SettingsView, RelocateView
+  UI/               MainView (drop/loaded), ReviewMapView (table), SettingsView, RelocateView;
+                    LooperControls (segmented control, vector gear), Glyphs.h (all non-ASCII UI text)
   Prefs/            SessionPrefs (global/session settings JSON)
   Import/           ImportController + MapCommit (message-thread pipeline)
   Plugin/           PluginProcessor + PluginEditor (APVTS ADSR/Volume/Filter)
@@ -49,6 +50,8 @@ Tests/
   PatchStoreTests.cpp JSON round-trip + relative paths
   SessionPrefsTests.cpp prefs serialize round-trip
   RelocatorTests.cpp  missing-sample search: case / tail match / ambiguity / cascade / Windows / unicode
+  RoundRobinTests.cpp Cycle unchanged, Random no-repeat + uniformity, seeds, no-alloc, patch field
+  SourceEncodingTests.cpp mojibake guard: no raw non-ASCII literals; UI text only via Glyphs.h
 docs/               Product, DSP, wireframes
 ```
 
@@ -84,7 +87,7 @@ Samples whose filename has no note name (e.g. `Pluck_alpha.wav`) are analysed on
 | Demo RAM sample + single full-range zone | **Done** |
 | Linear AmpEnv ADSR + APVTS params | **Done** |
 | SVF (LP/HP/BP) + cutoff / res / env amt APVTS | **Done** |
-| Map RR cycle / velocity layers at play | **Done** (cycle RR; vel layers by range) |
+| Map RR / velocity layers at play | **Done** (RR Cycle or Random per patch; vel layers by range) |
 | Streaming sample I/O | TODO |
 | Patch JSON save/load + host state | **Done** |
 | WAV/AIFF/FLAC RAM load on import | **Done** |
@@ -111,7 +114,16 @@ Samples whose filename has no note name (e.g. `Pluck_alpha.wav`) are analysed on
 4. Click **Accept map** to commit zones into the playable `InstrumentMap`, or **Back to play** to discard.
 5. After Accept, the main view shows zone/root counts, sample list, **Review map** (re-open last result), and **+ Samples**.
 
-Host-automatable params: **Attack / Decay / Sustain / Release / Volume / Filter Type / Cutoff / Resonance / Filter Env Amt**.
+Host-automatable params: **Attack / Decay / Sustain / Release / Volume / Filter Type / Cutoff / Resonance / Filter Env Amt / Round Robin**.
+
+### Round-robin mode (Cycle / Random)
+
+Zones that share a note, a velocity layer and a non-zero `rrGroup` are round-robin alternates. The **ROUND ROBIN `Cycle | Random`** switch sits in the header of the **SAMPLES** card on the main view (also *Settings → Mapping → Round-robin mode*, and the host parameter **Round Robin**):
+
+- **Cycle** (default, unchanged v1 behaviour): alternates play in `rrIndex` order, wrapping around; one counter per `rrGroup`.
+- **Random**: a uniformly random alternate each hit, **never the same one twice in a row** when the group has 2+ alternates (a single alternate just plays). The "last played" memory is per keyzone / velocity-layer group.
+- Real-time safe: PCG32 generator (`Source/VoiceEngine/FastRng.h`), fixed-size per-group state table and stack scratch, so zone selection never allocates or locks on the audio thread (verified by `RoundRobinTests` with a counting `operator new`). Each plugin instance seeds itself differently; tests seed explicitly.
+- Saved per patch as `map.roundRobinMode` (`"cycle"` / `"random"`) in `.looper.json` and in host state. Older patches without the field load as **Cycle**. The switch is dimmed (still usable) when the patch has no RR alternates.
 
 ### Save / Load patch (Standalone or plugin UI)
 
@@ -120,7 +132,7 @@ Host-automatable params: **Attack / Decay / Sustain / Release / Volume / Filter 
 3. Click **Open…** (available even on the empty drop screen) → pick a `.looper.json` / `.json`. Samples are decoded on the message thread into `SamplePool`; if any sample files are missing the patch still loads (those zones stay **silent**) and the **Relocate** screen opens.
 4. Host project save/recall (`getStateInformation` / `setStateInformation`) embeds APVTS + a patch JSON blob. If sample paths from the previous session are still valid, buffers reload; otherwise the zones stay silent and the main view shows a **“N samples missing · Relocate…”** banner.
 
-**Format sketch (schemaVersion 1):** `name`, `patchRoot`, `samples[]` (`id`, `path`, …), `map` (globals + `zones[]`), optional `params` (APVTS float snapshot).
+**Format sketch (schemaVersion 1):** `name`, `patchRoot`, `samples[]` (`id`, `path`, …), `map` (globals incl. optional `roundRobinMode` + `zones[]`), optional `params` (APVTS float snapshot).
 
 ### Relocate missing samples
 
@@ -145,7 +157,7 @@ JUCE is pulled via **CMake FetchContent** (not vendored). Requires CMake ≥ 3.2
 cmake -S . -B build -DLOOPER_BUILD_PLUGIN=OFF -DLOOPER_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
-# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests
+# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/SourceEncodingTests
 ```
 
 ### Full plugin (macOS / Windows recommended)
@@ -165,17 +177,21 @@ First configure downloads JUCE **8.0.6** into the CMake build `_deps` tree (git-
 
 ## Settings / preferences
 
-Open **⚙** (top-right on the main view) in Standalone or the plugin editor. **← Back to play** returns to MainView.
+Open the **gear** button (top-right on the main view) in Standalone or the plugin editor. **← Back to play** returns to MainView.
 
 | Tab | Controls |
 |-----|----------|
 | **Engine** | Polyphony (1–128) → map + voice engine; Interpolation (Hermite; sinc later); Glide ms (stored on map; engine portamento TODO); Master soft-clip On/Off (tanh on voice sum); Default filter LP/HP/BP → APVTS |
-| **Mapping** | Middle C C4=60 (locked); Key span full 0–127 vs natural; RR Cycle (Random later); Velocity curve Linear/Soft/Hard; Unpitched equal-spread + warn; Open review after import On/Off |
+| **Mapping** | Middle C C4=60 (locked); Key span full 0–127 vs natural; Round-robin mode Cycle / Random (per patch, same parameter as the main-view switch); Velocity curve Linear/Soft/Hard; Unpitched equal-spread + warn; Open review after import On/Off |
 | **MIDI** | Pitch bend ±2 (stored; engine uses range); Mod target FilterCutoff / Volume; Sustain CC64 note (TODO); Clear MIDI learn stub |
-| **Files** | Last patch path; missing-file offline policy; Reveal last patch folder |
+| **Files** | Last patch path; missing-file policy (silent zones + Relocate…); Reveal last patch folder |
 | **About** | Looper / Loop Audio Lab / version / GitHub URL |
 
 Session prefs persist in host state (`prefsJson` alongside patch). Mapping options feed the **next** AutoMapper import. ADSR / filter knobs stay on MainView.
+
+### UI text and symbols (no mojibake)
+
+`juce::String (const char*)` reads its argument as ASCII/Latin-1, so a raw UTF-8 literal such as `"Off · 0 ms"` shows up garbled, and MSVC can mangle it at compile time. Rule: **`Source/UI` and `Source/Plugin` stay pure ASCII**; every middle dot, ellipsis, dash, arrow or ± comes from `Source/UI/Glyphs.h` (`glyph::ellipsis()`, `glyph::dotSep()`, … built with `CharPointer_UTF8` from escaped bytes), and the settings gear is a drawn vector icon (`GearButton`), not a font glyph. `SourceEncodingTests` fails the build's test step if a raw non-ASCII literal (anywhere in `Source/`) or a stray UTF-8 escape (UI/Plugin outside `Glyphs.h`) appears.
 
 ## Status — drag-drop + review UI
 

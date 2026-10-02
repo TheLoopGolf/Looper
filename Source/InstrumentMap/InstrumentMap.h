@@ -65,6 +65,17 @@ enum class ModWheelTarget
     Volume
 };
 
+/**
+ * How a round-robin group (zones sharing note + velocity layer + rrGroup) picks its next
+ * alternate. Cycle = rrIndex order (default, v1 behaviour). Random = uniform choice that
+ * never repeats the previously played alternate when the group has 2+ alternates.
+ */
+enum class RoundRobinMode
+{
+    Cycle = 0,
+    Random = 1
+};
+
 struct InstrumentMap
 {
     std::vector<Zone> zones;
@@ -73,6 +84,8 @@ struct InstrumentMap
     float glideMs = 0.0f;
     VelCurve velCurve = VelCurve::Linear;
     ModWheelTarget modWheelTarget = ModWheelTarget::FilterCutoff;
+    /** Per-patch RR mode (.looper.json "roundRobinMode"; missing = Cycle). */
+    RoundRobinMode rrMode = RoundRobinMode::Cycle;
 
     /** Indices of zones matching note + velocity, in map order (stable). */
     std::vector<size_t> matchingZoneIndices(int note, int velocity) const

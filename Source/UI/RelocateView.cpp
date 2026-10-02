@@ -1,15 +1,16 @@
 #include "RelocateView.h"
 #include "../Plugin/PluginProcessor.h"
+#include "Glyphs.h"
 
 #include <algorithm>
 
 namespace looper {
 
 namespace {
-juce::String u8 (const std::string& s) { return juce::String::fromUTF8 (s.c_str()); }
-juce::String ellipsis() { return juce::String::fromUTF8 ("\xe2\x80\xa6"); }
+juce::String u8 (const std::string& s) { return glyph::utf8 (s.c_str()); }
+juce::String ellipsis() { return glyph::ellipsis(); }
 
-/** Draw a path, trimming from the left ("…/Kit/Snares/s1.wav") so the tail stays visible. */
+/** Draw a path, trimming from the left (".../Kit/Snares/s1.wav") so the tail stays visible. */
 void drawPathTail (juce::Graphics& g, const juce::String& text, int x, int w, int h)
 {
     const auto font = g.getCurrentFont();
@@ -40,7 +41,7 @@ RelocateView::RelocateView (LooperAudioProcessor& processor) : processor_ (proce
     brandSub_.setColour (juce::Label::textColourId, Palette::muted());
     addAndMakeVisible (brandSub_);
 
-    title_.setText (juce::String::fromUTF8 ("Relocate missing samples \xe2\x80\x94 relink moved files, then play on."),
+    title_.setText (glyph::spaced ("Relocate missing samples", glyph::emDash(), "relink moved files, then play on."),
                     juce::dontSendNotification);
     title_.setColour (juce::Label::textColourId, Palette::sand());
     addAndMakeVisible (title_);
@@ -49,6 +50,8 @@ RelocateView::RelocateView (LooperAudioProcessor& processor) : processor_ (proce
     addAndMakeVisible (summary_);
 
     // Primary action (LooperLookAndFeel renders bright fills as the fairway primary style)
+    searchBtn_.setButtonText ("Search folder" + ellipsis());
+    locateBtn_.setButtonText ("Locate" + ellipsis());
     searchBtn_.setColour (juce::TextButton::buttonColourId, Palette::fairway());
     searchBtn_.setColour (juce::TextButton::textColourOffId, Palette::bg());
     searchBtn_.setTooltip ("Pick a folder: every missing file is searched for by name (recursively).");
@@ -194,7 +197,7 @@ juce::String RelocateView::getCellTooltip (int row, int)
         tip << "\nOther candidates:";
         for (const auto& a : r.alternatives)
             tip << "\n  " << u8 (a);
-        tip << juce::String::fromUTF8 ("\nUse Locate\xe2\x80\xa6 to pick a different one.");
+        tip << "\nUse Locate" << ellipsis() << " to pick a different one.";
     }
     return tip;
 }
@@ -281,7 +284,7 @@ void RelocateView::runSearch (const std::string& folder)
         footer_.setText ("Nothing left to search for.", juce::dontSendNotification);
         return;
     }
-    setBusy (true, juce::String::fromUTF8 ("Searching ") + u8 (folder) + ellipsis());
+    setBusy (true, "Searching " + u8 (folder) + ellipsis());
     cancel_->store (false);
     auto cancel = cancel_;
     juce::Component::SafePointer<RelocateView> safe (this);
@@ -306,7 +309,7 @@ void RelocateView::runCascade (const std::string& foundOriginal, const std::stri
     auto targets = unresolvedTargets (false);
     if (targets.empty())
         return;
-    setBusy (true, juce::String::fromUTF8 ("Trying the same folder for the rest") + ellipsis());
+    setBusy (true, "Trying the same folder for the rest" + ellipsis());
     cancel_->store (false);
     auto cancel = cancel_;
     juce::Component::SafePointer<RelocateView> safe (this);
@@ -380,7 +383,8 @@ void RelocateView::applyMatches (const std::vector<RelocationMatch>& matches, co
     juce::String msg;
     msg << "Found " << found << " of " << (int) matches.size() << " " << context << ".";
     if (ambiguous > 0)
-        msg << " " << ambiguous << juce::String::fromUTF8 (" ambiguous \xe2\x80\x94 hover to see candidates, Locate\xe2\x80\xa6 to override.");
+        msg << " " << ambiguous << " ambiguous " << glyph::emDash() << " hover to see candidates, Locate" << ellipsis()
+            << " to override.";
     if (failed > 0)
         msg << " " << failed << " could not be decoded.";
     if (notFound > 0 && found == 0)

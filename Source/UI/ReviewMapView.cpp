@@ -1,5 +1,6 @@
 #include "ReviewMapView.h"
 #include "../AutoMapper/FilenameTokens.h"
+#include "Glyphs.h"
 
 namespace looper {
 
@@ -35,7 +36,8 @@ ReviewMapView::ReviewMapView()
     brandSub_.setColour (juce::Label::textColourId, Palette::muted());
     addAndMakeVisible (brandSub_);
 
-    subtitle_.setText ("Review map — fix auto-map, then return to play.", juce::dontSendNotification);
+    subtitle_.setText (glyph::spaced ("Review map", glyph::emDash(), "fix auto-map, then return to play."),
+                       juce::dontSendNotification);
     subtitle_.setColour (juce::Label::textColourId, Palette::fairway());
     addAndMakeVisible (subtitle_);
 
@@ -90,8 +92,8 @@ void ReviewMapView::setResult (const AutoMapResult& result, const std::vector<Sa
     auto nameFor = [&] (const std::string& id) -> juce::String {
         for (const auto& r : refs)
             if (r.id == id)
-                return r.displayName.empty() ? r.path : r.displayName;
-        return id;
+                return glyph::utf8 ((r.displayName.empty() ? r.path : r.displayName).c_str());
+        return glyph::utf8 (id.c_str());
     };
     int warns = 0;
     for (const auto& rev : result.reviews)
@@ -100,9 +102,9 @@ void ReviewMapView::setResult (const AutoMapResult& result, const std::vector<Sa
         row.sample = nameFor (rev.sampleId);
         row.source = pitchLabel (rev.source);
         row.confidence = juce::String (rev.confidence, 2);
-        row.pitch = juce::String::fromUTF8 (describePitch (rev).c_str());
+        row.pitch = glyph::utf8 (describePitch (rev).c_str()); // AutoMapper text is UTF-8 (arrows, minus)
         if (! rev.warnings.empty())
-            row.pitch << juce::String::fromUTF8 ("  \xe2\x80\x94 ") << juce::String::fromUTF8 (rev.warnings.front().c_str());
+            row.pitch << "  " << glyph::emDash() << " " << glyph::utf8 (rev.warnings.front().c_str());
         if (const Zone* z = findZone (result.map, rev.sampleId))
         {
             row.root = midiToNoteName (z->rootKey);
@@ -120,8 +122,9 @@ void ReviewMapView::setResult (const AutoMapResult& result, const std::vector<Sa
         rows_.push_back (std::move (row));
     }
     juce::String sum;
-    sum << "Auto-map review · " << (int) rows_.size() << " samples";
-    if (warns > 0) sum << " · " << warns << " warning" << (warns == 1 ? "" : "s");
+    const auto dot = glyph::dotSep();
+    sum << "Auto-map review" << dot << (int) rows_.size() << " samples";
+    if (warns > 0) sum << dot << warns << " warning" << (warns == 1 ? "" : "s");
     summary_.setText (sum, juce::dontSendNotification);
     table_.updateContent();
     repaint();

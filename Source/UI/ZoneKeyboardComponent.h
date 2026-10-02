@@ -18,7 +18,7 @@ public:
     void setZones (const std::vector<ZoneKeySpan>& zones);
     void clearZones();
 
-    /** Visible MIDI range (inclusive). Default C2–C7 (36–96). */
+    /** Visible MIDI range (inclusive). Default C2-C7 (36-96). */
     void setKeyRange (int lowMidi, int highMidi);
 
 private:

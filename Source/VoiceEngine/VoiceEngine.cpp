@@ -190,7 +190,34 @@ void VoiceEngine::mapChanged()
 
 void VoiceEngine::clearRrCounters()
 {
-    rrCounters_.clear();
+    for (auto& slot : rrSlots_)
+        slot = RrSlot{};
+}
+
+VoiceEngine::RrSlot& VoiceEngine::rrSlot(int group, int lead) noexcept
+{
+    // Integer mix of (group, lead) -> home slot; linear probe. If the table is ever full
+    // (more than kRrSlots distinct groups played) groups share the home slot: RR still
+    // works, only the per-group memory degrades.
+    uint32_t h = static_cast<uint32_t>(group) * 0x9E3779B1u ^ (static_cast<uint32_t>(lead) + 0x7F4A7C15u) * 0x85EBCA77u;
+    h ^= h >> 15;
+    const size_t home = static_cast<size_t>(h) & (kRrSlots - 1);
+    for (size_t probe = 0; probe < kRrSlots; ++probe)
+    {
+        auto& slot = rrSlots_[(home + probe) & (kRrSlots - 1)];
+        if (!slot.used)
+        {
+            slot.used = true;
+            slot.group = group;
+            slot.lead = lead;
+            slot.counter = 0;
+            slot.lastZone = -1;
+            return slot;
+        }
+        if (slot.group == group && slot.lead == lead)
+            return slot;
+    }
+    return rrSlots_[home];
 }
 
 const Zone* VoiceEngine::selectZone(int note, int velocity)
@@ -198,42 +225,88 @@ const Zone* VoiceEngine::selectZone(int note, int velocity)
     if (map_ == nullptr || map_->zones.empty())
         return nullptr;
 
-    const auto indices = map_->matchingZoneIndices(note, velocity);
-    if (indices.empty())
+    const auto& zones = map_->zones;
+    const size_t numZones = zones.size();
+
+    // First match in stable map order decides the group.
+    size_t first = numZones;
+    for (size_t i = 0; i < numZones; ++i)
+    {
+        if (zones[i].matchesNoteVelocity(note, velocity))
+        {
+            first = i;
+            break;
+        }
+    }
+    if (first == numZones)
         return nullptr;
 
-    // Best group = rrGroup of the first match in stable map order.
-    const int bestGroup = map_->zones[indices.front()].rrGroup;
-
-    std::vector<size_t> groupIndices;
-    groupIndices.reserve(indices.size());
-    for (size_t idx : indices)
-    {
-        if (map_->zones[idx].rrGroup == bestGroup)
-            groupIndices.push_back(idx);
-    }
-
-    if (groupIndices.empty())
-        return &map_->zones[indices.front()];
+    const int bestGroup = zones[first].rrGroup;
 
     // rrGroup == 0 means no RR: first stable match wins (even if duplicates).
-    if (bestGroup == 0 || groupIndices.size() == 1)
-        return &map_->zones[groupIndices.front()];
+    if (bestGroup == 0)
+        return &zones[first];
 
-    // Cycle mode: sort by rrIndex ascending, pick next counter % size.
-    std::sort(groupIndices.begin(), groupIndices.end(),
-              [this](size_t a, size_t b) {
-                  const int ia = map_->zones[a].rrIndex;
-                  const int ib = map_->zones[b].rrIndex;
+    // Alternates = matching zones in the same rrGroup (stack scratch, no allocation).
+    std::array<uint32_t, kMaxRrAlternates> group;
+    size_t count = 0;
+    for (size_t i = first; i < numZones && count < kMaxRrAlternates; ++i)
+    {
+        if (zones[i].rrGroup == bestGroup && zones[i].matchesNoteVelocity(note, velocity))
+            group[count++] = static_cast<uint32_t>(i);
+    }
+
+    if (count <= 1)
+        return &zones[first];
+
+    // Sort by rrIndex ascending, stable tie-break by map order.
+    std::sort(group.begin(), group.begin() + static_cast<std::ptrdiff_t>(count),
+              [&zones](uint32_t a, uint32_t b) {
+                  const int ia = zones[a].rrIndex;
+                  const int ib = zones[b].rrIndex;
                   if (ia != ib)
                       return ia < ib;
-                  return a < b; // stable tie-break by map order
+                  return a < b;
               });
 
-    uint32_t& counter = rrCounters_[bestGroup];
-    const size_t pick = static_cast<size_t>(counter % static_cast<uint32_t>(groupIndices.size()));
-    ++counter;
-    return &map_->zones[groupIndices[pick]];
+    // Per keyzone / velocity-layer memory of the last alternate played (both modes record it,
+    // so switching Cycle -> Random never repeats the note that just sounded).
+    RrSlot& memory = rrSlot(bestGroup, static_cast<int>(first));
+
+    size_t pick = 0;
+    if (rrMode_.load(std::memory_order_relaxed) == RoundRobinMode::Random)
+    {
+        size_t lastPos = count;
+        for (size_t k = 0; k < count; ++k)
+        {
+            if (static_cast<int32_t>(group[k]) == memory.lastZone)
+            {
+                lastPos = k;
+                break;
+            }
+        }
+        if (lastPos < count)
+        {
+            // Uniform over the other count-1 alternates: draw in [0, count-1), skip lastPos.
+            pick = rng_.nextBelow(static_cast<uint32_t>(count - 1));
+            if (pick >= lastPos)
+                ++pick;
+        }
+        else
+        {
+            pick = rng_.nextBelow(static_cast<uint32_t>(count));
+        }
+    }
+    else
+    {
+        // Cycle mode (v1): per-rrGroup counter, next counter % size.
+        RrSlot& cycle = rrSlot(bestGroup, -1);
+        pick = static_cast<size_t>(cycle.counter % static_cast<uint32_t>(count));
+        ++cycle.counter;
+    }
+
+    memory.lastZone = static_cast<int32_t>(group[pick]);
+    return &zones[group[pick]];
 }
 
 int VoiceEngine::allocateVoice(int note, int channel)
@@ -385,6 +458,7 @@ void VoiceEngine::noteOn(int note, int velocity, int channel)
     }
 
     // Fallback: demo sample at root 60 when no map/zones match
+    if (!buffer)
     {
         zone = makeDemoZone();
         zone.rootKey = 60;

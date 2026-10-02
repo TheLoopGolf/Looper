@@ -1,5 +1,6 @@
 #pragma once
 
+#include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "LooperLookAndFeel.h"
 #include <functional>
@@ -8,7 +9,7 @@ class LooperAudioProcessor;
 
 namespace looper {
 
-/** Settings / preferences — left nav Engine | Mapping | MIDI | Files | About. */
+/** Settings / preferences - left nav Engine | Mapping | MIDI | Files | About. */
 class SettingsView : public juce::Component
 {
 public:
@@ -38,7 +39,8 @@ private:
     void updateNavStyles();
     void updateVisibility();
     void styleCombo(juce::ComboBox& c);
-    void layoutRows(juce::Rectangle<int> area, PrefRow* rows, int count);
+    /** Lays out `count` rows from the top of `area` and consumes that space. */
+    void layoutRows(juce::Rectangle<int>& area, PrefRow* rows, int count);
     void applyEngineFromUi();
     void applyMappingFromUi();
     void applyMidiFromUi();
@@ -51,7 +53,7 @@ private:
     LooperLookAndFeel lookAndFeel_;
 
     juce::Label brand_, title_, subtitle_, chromeHint_;
-    juce::TextButton backBtn_ { "← Back to play" };
+    juce::TextButton backBtn_; // "<- Back to play" (arrow glyph set in the constructor)
 
     juce::TextButton navEngine_ { "Engine" };
     juce::TextButton navMapping_ { "Mapping" };
@@ -68,6 +70,7 @@ private:
     // Mapping
     juce::ComboBox midCBox_, spanBox_, rrBox_, velBox_, unpitchedBox_, reviewBox_;
     PrefRow mappingRows_[6];
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> rrAttachment_;
 
     // MIDI
     juce::ComboBox bendBox_, modBox_;

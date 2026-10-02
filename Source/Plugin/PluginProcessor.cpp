@@ -53,6 +53,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout LooperAudioProcessor::create
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"filterEnvAmt", 1}, "Filter Env",
         juce::NormalisableRange<float>(-1.0f, 1.0f, 0.001f), 0.0f));
+    // Round-robin mode (per patch; mirrored into .looper.json map.roundRobinMode).
+    // Index order must match looper::RoundRobinMode (0 = Cycle default, 1 = Random).
+    params.push_back(std::make_unique<juce::AudioParameterChoice>(
+        juce::ParameterID{"rrMode", 1}, "Round Robin",
+        juce::StringArray{"Cycle", "Random"}, 0));
     return { params.begin(), params.end() };
 }
 
@@ -65,6 +70,9 @@ LooperAudioProcessor::LooperAudioProcessor()
     map_ = *mapShared_;
     voiceEngine_.adoptMap(mapShared_);
     voiceEngine_.setSamplePool(&samplePool_);
+    // Random round-robin: fresh sequence per plugin instance (tests seed explicitly).
+    voiceEngine_.setRandomSeed(static_cast<uint64_t>(juce::Time::getHighResolutionTicks())
+                               ^ static_cast<uint64_t>(juce::Random::getSystemRandom().nextInt64()));
     applyPrefsToRuntime();
     ensureDemoInstrument();
 }
@@ -234,6 +242,7 @@ void LooperAudioProcessor::syncParamsToEngine()
     fp.resonance = apvts_.getRawParameterValue("resonance")->load();
     fp.envAmount = apvts_.getRawParameterValue("filterEnvAmt")->load();
     voiceEngine_.setFilterParams(fp);
+    voiceEngine_.setRoundRobinMode(currentRoundRobinMode());
 
     looper::ModWheelTarget target = looper::ModWheelTarget::FilterCutoff;
     {
@@ -308,6 +317,7 @@ Patch LooperAudioProcessor::buildCurrentPatch() const
     patch.name = patchName_.toStdString();
     patch.patchRoot = ".";
     patch.map = copyInstrumentMap();
+    patch.map.rrMode = currentRoundRobinMode(); // APVTS "rrMode" is the live source of truth
     patch.samples = userSampleRefs_;
 
     // Snapshot host-automatable floats for convenience (restored on load when present).
@@ -354,7 +364,7 @@ bool LooperAudioProcessor::applyPatch(const Patch& patch, juce::StringArray* mis
         SampleRef ref = refIn;
         if (ref.path.find("://") != std::string::npos)
         {
-            // Special / demo URI — keep metadata, no file load
+            // Special / demo URI - keep metadata, no file load
             samplePool_.addStub(ref);
             loadedRefs.push_back(ref);
             continue;
@@ -366,7 +376,7 @@ bool LooperAudioProcessor::applyPatch(const Patch& patch, juce::StringArray* mis
             offlineSampleIds_.push_back(ref.id);
             if (missingPathsOut != nullptr)
                 missingPathsOut->add(juce::String(ref.path));
-            samplePool_.addStub(ref); // keep zone metadata; buffer absent → silent/offline
+            samplePool_.addStub(ref); // keep zone metadata; buffer absent -> silent/offline
             loadedRefs.push_back(ref);
             continue;
         }
@@ -400,6 +410,8 @@ bool LooperAudioProcessor::applyPatch(const Patch& patch, juce::StringArray* mis
             param->setValueNotifyingHost(param->convertTo0to1(denorm));
         }
     }
+    // Patch field wins for RR mode (older patches without it load as Cycle).
+    setRoundRobinMode(patch.map.rrMode);
 
     syncParamsToEngine();
     return true;
@@ -467,6 +479,19 @@ bool LooperAudioProcessor::relocateSample(const std::string& sampleId, const juc
                             offlineSampleIds_.end());
     patchDirty_ = true;
     return true;
+}
+
+looper::RoundRobinMode LooperAudioProcessor::currentRoundRobinMode() const
+{
+    if (auto* raw = apvts_.getRawParameterValue("rrMode"))
+        return raw->load() >= 0.5f ? looper::RoundRobinMode::Random : looper::RoundRobinMode::Cycle;
+    return looper::RoundRobinMode::Cycle;
+}
+
+void LooperAudioProcessor::setRoundRobinMode(looper::RoundRobinMode mode)
+{
+    if (auto* param = apvts_.getParameter("rrMode"))
+        param->setValueNotifyingHost(param->convertTo0to1(mode == looper::RoundRobinMode::Random ? 1.0f : 0.0f));
 }
 
 void LooperAudioProcessor::getStateInformation(juce::MemoryBlock& destData)

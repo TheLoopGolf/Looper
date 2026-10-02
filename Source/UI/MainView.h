@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_gui_extra/juce_gui_extra.h>
+#include "LooperControls.h"
 #include "LooperLookAndFeel.h"
 #include "ZoneKeyboardComponent.h"
 #include <functional>
@@ -59,10 +60,15 @@ private:
     juce::Label ampTitle_, filterTitle_;
     juce::TextButton reviewBtn_ { "Review map" };
     juce::TextButton addBtn_ { "+ Samples" };
-    juce::TextButton openBtn_ { juce::String::fromUTF8 ("Open\xe2\x80\xa6") };
+    juce::TextButton openBtn_;   // "Open..." (ellipsis glyph set in the constructor)
     juce::TextButton saveBtn_ { "Save" };
-    juce::TextButton settingsBtn_ { juce::String::fromUTF8 ("\xe2\x9a\x99") }; // gear
+    GearButton settingsBtn_;     // vector gear: no font glyph needed
     juce::TextButton missingBanner_;
+
+    // Round-robin mode (APVTS "rrMode", saved per patch) in the SAMPLES card header
+    juce::Label rrLabel_;
+    SegmentedChoice rrToggle_ { juce::StringArray { "Cycle", "Random" } };
+    juce::TooltipWindow tooltips_ { this, 600 };
 
     ZoneKeyboardComponent zoneKeyboard_;
 

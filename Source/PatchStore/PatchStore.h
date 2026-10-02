@@ -92,6 +92,9 @@ public:
     static std::optional<VelCurve> velCurveFromString(const std::string& s);
     static std::string modWheelTargetToString(ModWheelTarget t);
     static std::optional<ModWheelTarget> modWheelTargetFromString(const std::string& s);
+    /** "cycle" / "random" (map key "roundRobinMode"; missing or unknown loads as Cycle). */
+    static std::string roundRobinModeToString(RoundRobinMode m);
+    static std::optional<RoundRobinMode> roundRobinModeFromString(const std::string& s);
 };
 
 } // namespace looper

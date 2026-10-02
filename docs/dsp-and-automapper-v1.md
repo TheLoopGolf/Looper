@@ -226,7 +226,11 @@ ratio = 2^((note + bendSemis + coarse + cents/100 - rootKey) / 12)
 
 ### Zone lookup (note on)
 1. Find zones where `keyLow ≤ note ≤ keyHigh` and `velLow ≤ vel ≤ velHigh`
-2. If multiple RR indices in same group, pick next RR
+2. If multiple RR indices in same group, pick by the patch's round-robin mode: **Cycle** = next RR
+   in `rrIndex` order (counter per `rrGroup`); **Random** = uniform among the alternates, never the
+   one played last in that keyzone/velocity-layer group (2+ alternates). PCG32 RNG, fixed-size
+   state table, no audio-thread allocation. Persisted as `map.roundRobinMode` ("cycle"/"random";
+   missing = cycle).
 3. If still multiple (bad map), pick highest confidence / first stable order
 4. Start voice with that zone
 

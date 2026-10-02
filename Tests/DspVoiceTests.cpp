@@ -700,6 +700,9 @@ static void testOfflineZoneIsSilent()
     pool.setBuffer("offline", makeDemoToneBuffer(44100.0));
     engine.noteOn(60, 100, 1);
     CHECK(engine.activeVoiceCount() == 1);
+    // ...and it is the zone's own sample that sounds, not the demo fallback (regression).
+    const Voice* v = engine.findActiveVoice(60, 1);
+    CHECK(v != nullptr && v->zone.sampleId == "offline");
 }
 
 int main()
