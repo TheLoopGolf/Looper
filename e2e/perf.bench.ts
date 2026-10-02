@@ -13,3 +13,12 @@ for (const backend of ['webgpu', 'webgl2'] as const) {
     console.log(JSON.stringify(r, null, 2));
   });
 }
+
+for (const backend of ['webgpu', 'webgl2'] as const) {
+  test(`brush latency on 6000x4000 × 20 layers (${backend})`, async ({ page }) => {
+    await page.goto('/harness.html');
+    await page.waitForFunction(() => document.title === 'harness ready');
+    const r = await page.evaluate((b) => (window as any).harness.brushLatency(b, { width: 6000, height: 4000, layers: 20, events: 120 }), backend);
+    console.log(JSON.stringify(r, null, 2));
+  });
+}

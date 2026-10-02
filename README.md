@@ -7,7 +7,7 @@ undoable and editable.
 
 > This repository was previously an empty "Looper" placeholder; it now hosts the Canvas AI monorepo.
 
-**Status:** Milestone 1 (foundation) — see [docs/milestones/M1.md](docs/milestones/M1.md).
+**Status:** Milestone 2 (core editing) — see [M1](docs/milestones/M1.md) and [M2](docs/milestones/M2.md) reports.
 
 ## Quick start
 
@@ -87,9 +87,16 @@ The bus validates params against the schema, applies the patch, and records a
 macros) undo in one step and can be expanded in the History panel;
 `cancelGroup()` reverts a stopped run without leaving history behind.
 
+**Pixel engine** (`packages/core/src/raster`). Selections, masks, brush
+strokes, fills, gradients, adjustments (LUT + per-pixel kernel), filters,
+shape rasterization and affine resampling are pure, deterministic functions on
+tile grids, so commands replay exactly and golden tests are stable. Text is
+rasterized by the host (browser font engine) through a registered hook.
+
 **Rendering** (`packages/render`). For each 256×256 canvas tile, `buildTilePlan`
-produces the minimal list of blend operations (layers, isolated groups,
-pass-through groups). The same plan is executed by three backends:
+(in core) produces the minimal list of operations: layers (with masks),
+isolated groups, pass-through groups and adjustment layers. The same plan is
+executed by three backends:
 
 | Backend | Where | Notes |
 | --- | --- | --- |
@@ -100,8 +107,12 @@ pass-through groups). The same plan is executed by three backends:
 Composited tiles are cached as premultiplied, mipmapped textures. Each frame
 recomposites only dirty tiles (visible first, within a time budget) and draws
 cached tiles, so pan/zoom cost doesn't depend on layer count. GPU results are
-checked against the CPU reference within 1 LSB for all 26 blend modes and for
-nested groups.
+checked against the CPU reference within 1 LSB for all 26 blend modes, nested
+groups, every adjustment layer and layer masks.
+
+**Tools** (`packages/ui/src/tools`). Each tool turns pointer input into a
+live preview document (never in history) and commits one command on release —
+the same command an agent would call.
 
 **Files.** `.cnva` is a zip: `document.json` (tile grids replaced by
 references), `tiles/<grid>/<tx>_<ty>.png`, `thumbnail.png`, `history.json`.

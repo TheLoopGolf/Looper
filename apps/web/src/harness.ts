@@ -3,7 +3,7 @@
  * loads this page to run the GPU backends against the CPU reference and to
  * benchmark large documents.
  */
-import { ADJUSTMENT_KINDS, BLEND_MODE_IDS, CommandBus, createDefaultRegistry, createDocument, type BlendMode, type Document } from '@canvas-ai/core';
+import { ADJUSTMENT_KINDS, BLEND_MODE_IDS, CommandBus, DEFAULT_BRUSH, PatchBuilder, raster, StrokeAccumulator, type PixelLayer, createDefaultRegistry, createDocument, type BlendMode, type Document } from '@canvas-ai/core';
 import { createRenderer, renderDocumentCPU, type RenderBackend, type Renderer } from '@canvas-ai/render';
 import { adjustmentScene, blendScene, groupScene, maskScene } from '@canvas-ai/render/testing';
 import { createSampleDocument } from '@canvas-ai/ui';
@@ -140,7 +140,43 @@ async function renderLoop(backend: RenderBackend, docName: 'sample' | 'bench', b
   return { pendingFrames, px: [...px], snapshot };
 }
 
+/**
+ * Brush latency: per pointer event, the work the brush tool does (stamp, apply
+ * to touched tiles, build the preview document) plus the renderer's frame
+ * (dirty-tile recomposite + draw), on a large layered document.
+ */
+async function brushLatency(backend: RenderBackend, opts: { width: number; height: number; layers: number; events: number }) {
+  const doc = benchmarkDocument(opts.width, opts.height, opts.layers);
+  const { renderer, canvas } = await makeRenderer(backend, 1280, 800);
+  renderer.frameBudgetMs = 1e9;
+  const view = { zoom: 0.5, panX: 0, panY: 0 };
+  renderer.setDocument(doc);
+  while (renderer.render(view));
+  await renderer.readComposite({ x: 0, y: 0, width: 1, height: 1 });
+  const layer = doc.layers[doc.layers.length - 1] as PixelLayer;
+  const acc = new StrokeAccumulator({ ...DEFAULT_BRUSH, size: 60, hardness: 0.6 }, doc.width, doc.height);
+  let preview = layer.tiles;
+  const times: number[] = [];
+  for (let i = 0; i < opts.events; i++) {
+    const t0 = performance.now();
+    // ~4 coalesced samples per event, 6px apart: a fast stroke.
+    const pts = [0, 1, 2, 3].map((k) => ({ x: 400 + (i * 4 + k) * 6, y: 600 + Math.sin((i * 4 + k) / 20) * 200, pressure: 1 }));
+    const dirty = acc.addPoints(pts);
+    preview = raster.applyStroke(layer.tiles, acc, dirty, { mode: 'paint', color: [20, 40, 200, 255], selection: null }, preview);
+    const next = new PatchBuilder(doc).replaceLayer({ ...layer, tiles: preview }).doc;
+    renderer.setDocument(next);
+    renderer.render(view);
+    times.push(performance.now() - t0);
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  renderer.dispose();
+  canvas.remove();
+  times.sort((a, b) => a - b);
+  return { backend, events: opts.events, cpuMsP50: times[Math.floor(times.length / 2)], cpuMsP95: times[Math.floor(times.length * 0.95)], cpuMsMax: times[times.length - 1] };
+}
+
 const harness = {
+  brushLatency,
   renderLoop,
   blendModes: BLEND_MODE_IDS,
   compareBlendModes: (backend: RenderBackend) => compare(backend, BLEND_MODE_IDS.map((m) => blendScene(m))),
