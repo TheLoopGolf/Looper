@@ -84,6 +84,8 @@ export const paintStroke = defineCommand<StrokeParams>({
       color: (p.color ?? [0, 0, 0, 255]) as unknown as RGBA,
       selection: target === 'selection' ? null : (doc.selection?.mask ?? null),
       defaultValue,
+      // Quick mask: painting adds to the selection, erasing removes from it.
+      value: target === 'selection' ? 255 : undefined,
     });
     const b = new PatchBuilder(doc);
     if (target === 'selection') b.setDocProps({ selection: out.tiles.size ? { mask: out } : null });

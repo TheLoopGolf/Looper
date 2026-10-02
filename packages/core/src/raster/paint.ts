@@ -14,6 +14,8 @@ export interface StrokeApplyOptions {
   readonly selection: TileGrid | null;
   /** For 1-channel targets: value of missing tiles (255 for reveal-all masks). */
   readonly defaultValue?: number;
+  /** For 1-channel targets: value painting moves toward (default: the color's grey level; erasing moves toward 0). */
+  readonly value?: number;
 }
 
 const luma8 = (c: RGBA) => Math.round(0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]);
@@ -38,7 +40,7 @@ export function applyStroke(source: TileGrid, acc: StrokeAccumulator, keys: Iter
     const [tx, ty] = tileCoords(key);
     const w = Math.min(TILE_SIZE, source.width - tx * TILE_SIZE);
     const h = Math.min(TILE_SIZE, source.height - ty * TILE_SIZE);
-    const target = channels === 1 ? (opts.mode === 'paint' ? luma8(opts.color) : 0) : 0;
+    const target = channels === 1 ? (opts.mode === 'paint' ? (opts.value ?? luma8(opts.color)) : 0) : 0;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const p = y * TILE_SIZE + x;

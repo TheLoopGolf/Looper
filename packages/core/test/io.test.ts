@@ -49,6 +49,24 @@ describe('.cnva format', () => {
     expect(back.thumbnail!.width).toBe(2);
   });
 
+  it('round-trips masks, channels, adjustment, shape and text layers', async () => {
+    const bus = makeBus(300, 200);
+    const a = bus.dispatch<{ layerId: string }>('layer.create', { color: [10, 20, 30, 255] }).layerId;
+    bus.dispatch('selection.ellipse', { x: 10, y: 10, width: 100, height: 80 });
+    bus.dispatch('layer.addMask', { layerId: a });
+    bus.dispatch('selection.save', { name: 'Oval' });
+    bus.dispatch('layer.createAdjustment', { kind: 'curves', params: { rgb: [[0, 10], [255, 240]] } });
+    bus.dispatch('layer.createShape', { shape: { kind: 'polygon', cx: 50, cy: 50, radius: 20, sides: 6, rotation: 0 }, fillColor: [1, 2, 3, 255] });
+    bus.dispatch('layer.createText', { text: 'Hello', x: 5, y: 6, style: { fontSize: 30 } });
+    const back = readCnva(await writeCnva({ document: bus.document })).document;
+    expect(back.channels.map((c) => c.name)).toEqual(['Oval']);
+    expect(back.selection).not.toBeNull();
+    expect(back.layers.map((l) => l.type)).toEqual(['pixel', 'adjustment', 'shape', 'text']);
+    expect(back.layers[0].mask).toMatchObject({ defaultValue: 0, enabled: true });
+    expect(back.layers[0].mask!.tiles.tiles.size).toBe(bus.document.layers[0].mask!.tiles.tiles.size);
+    expect(back.layers[3]).toMatchObject({ text: 'Hello', x: 5, style: { fontSize: 30 } });
+  });
+
   it('reports corrupt and future-version files', () => {
     expect(() => readCnva(new Uint8Array([1, 2, 3]))).toThrow(/not a valid/);
     const future = zipSync({ 'document.json': strToU8(JSON.stringify({ format: 'cnva', version: 99, document: {} })) });
