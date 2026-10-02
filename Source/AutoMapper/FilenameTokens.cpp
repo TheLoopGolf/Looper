@@ -39,7 +39,7 @@ bool isNoiseToken(const std::string& t)
 
 } // namespace
 
-std::optional<int> noteNameToMidi(const std::string& tokenIn)
+std::optional<int> noteNameToMidi(const std::string& tokenIn, bool middleCIsC4)
 {
     const std::string token = toLower(tokenIn);
     // [a-g] optional #/b, then octave -9..11 (design: -?[0-9]|10|11)
@@ -71,7 +71,8 @@ std::optional<int> noteNameToMidi(const std::string& tokenIn)
         --semitone;
 
     // Scientific: MIDI = (octave + 1) * 12 + semitone  → C4 = 60
-    const int midi = (octave + 1) * 12 + semitone;
+    // C3 = 60 convention: MIDI = (octave + 2) * 12 + semitone
+    const int midi = (octave + (middleCIsC4 ? 1 : 2)) * 12 + semitone;
     if (midi < 0 || midi > 127)
         return std::nullopt;
     return midi;
@@ -98,7 +99,7 @@ std::optional<int> velocityWordToValue(const std::string& wordIn)
     return std::nullopt;
 }
 
-FilenameTokens parseFilenameTokens(const std::string& filename)
+FilenameTokens parseFilenameTokens(const std::string& filename, bool middleCIsC4)
 {
     FilenameTokens out;
     out.originalStem = stripExtension(filename);
@@ -121,7 +122,7 @@ FilenameTokens parseFilenameTokens(const std::string& filename)
         std::sregex_iterator end;
         for (; it != end; ++it)
         {
-            const auto midi = noteNameToMidi((*it)[1].str());
+            const auto midi = noteNameToMidi((*it)[1].str(), middleCIsC4);
             if (midi)
             {
                 out.midiNote = midi;
@@ -141,7 +142,7 @@ FilenameTokens parseFilenameTokens(const std::string& filename)
             const std::string tok = ti->str();
             if (tok.empty() || isNoiseToken(tok))
                 continue;
-            if (const auto midi = noteNameToMidi(tok))
+            if (const auto midi = noteNameToMidi(tok, middleCIsC4))
             {
                 out.midiNote = midi;
                 break;
@@ -208,15 +209,94 @@ FilenameTokens parseFilenameTokens(const std::string& filename)
 }
 
 
-std::string midiToNoteName(int midiNote)
+std::string midiToNoteName(int midiNote, bool middleCIsC4)
 {
     static constexpr const char* kNames[12] = {
         "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
     };
     const int n = std::clamp(midiNote, 0, 127);
     const int pc = n % 12;
-    const int oct = (n / 12) - 1; // C4 = 60 → octave 4
+    const int oct = (n / 12) - (middleCIsC4 ? 1 : 2); // C4 = 60 → octave 4 (or C3 = 60)
     return std::string(kNames[pc]) + std::to_string(oct);
+}
+
+std::string layerGroupName(const FilenameTokens& tokens)
+{
+    // Tokenise on separators, drop velocity / dynamics / RR tokens (same vocabulary as
+    // parseFilenameTokens), re-join with single spaces.
+    static const std::regex rrTok(R"(^(?:rr|round|alt)\d+$)");
+    static const std::regex velTok(R"(^(?:velocity|vel|v)\d{1,3}$)");
+    static const std::regex numTok(R"(^\d+$)");
+    std::vector<std::string> parts;
+    std::string cur;
+    auto flush = [&] {
+        if (!cur.empty()) parts.push_back(cur);
+        cur.clear();
+    };
+    for (char c : tokens.normalizedStem)
+    {
+        if (c == ' ' || c == '_' || c == '-' || c == '.') flush();
+        else cur.push_back(c);
+    }
+    flush();
+
+    std::vector<std::string> kept;
+    for (size_t i = 0; i < parts.size(); ++i)
+    {
+        const auto& t = parts[i];
+        const bool prefixWord = t == "rr" || t == "round" || t == "alt"
+                             || t == "velocity" || t == "vel" || t == "v";
+        if (prefixWord && i + 1 < parts.size() && std::regex_match(parts[i + 1], numTok))
+        {
+            ++i; // "rr 2", "vel_64" -> drop both
+            continue;
+        }
+        if (std::regex_match(t, rrTok) || std::regex_match(t, velTok) || velocityWordToValue(t))
+            continue;
+        kept.push_back(t);
+    }
+    std::string out;
+    for (const auto& k : kept)
+    {
+        if (!out.empty()) out.push_back(' ');
+        out += k;
+    }
+    return out.empty() ? tokens.normalizedStem : out;
+}
+
+bool naturalLess(const std::string& a, const std::string& b)
+{
+    size_t i = 0, j = 0;
+    auto isDigit = [](char c) { return c >= '0' && c <= '9'; };
+    while (i < a.size() && j < b.size())
+    {
+        if (isDigit(a[i]) && isDigit(b[j]))
+        {
+            size_t ie = i, je = j;
+            while (ie < a.size() && isDigit(a[ie])) ++ie;
+            while (je < b.size() && isDigit(b[je])) ++je;
+            // Compare numerically without overflow: strip leading zeros, then length, then digits
+            size_t is = i, js = j;
+            while (is + 1 < ie && a[is] == '0') ++is;
+            while (js + 1 < je && b[js] == '0') ++js;
+            const size_t la = ie - is, lb = je - js;
+            if (la != lb) return la < lb;
+            const int c = a.compare(is, la, b, js, lb);
+            if (c != 0) return c < 0;
+            if ((ie - i) != (je - j)) return (ie - i) < (je - j); // "01" after "1"
+            i = ie;
+            j = je;
+            continue;
+        }
+        const char ca = static_cast<char>(std::tolower(static_cast<unsigned char>(a[i])));
+        const char cb = static_cast<char>(std::tolower(static_cast<unsigned char>(b[j])));
+        if (ca != cb) return ca < cb;
+        ++i;
+        ++j;
+    }
+    if ((a.size() - i) != (b.size() - j))
+        return (a.size() - i) < (b.size() - j);
+    return a < b; // case-only differences: deterministic tiebreak
 }
 
 } // namespace looper

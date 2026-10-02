@@ -91,6 +91,8 @@ std::string SessionPrefs::toJson() const
       << "\"cycleRrDefault\":" << (cycleRrDefault ? "true" : "false") << ','
       << "\"velCurve\":\"" << escape(PatchStore::velCurveToString(velCurve)) << "\","
       << "\"openReviewAfterImport\":" << (openReviewAfterImport ? "true" : "false") << ','
+      << "\"unpitchedFallback\":\"" << unpitchedFallbackToString(unpitchedFallback) << "\","
+      << "\"unpitchedStartNote\":" << unpitchedStartNote << ','
       << "\"pitchBendRangeSemis\":" << pitchBendRangeSemis << ','
       << "\"modWheelTarget\":\"" << escape(PatchStore::modWheelTargetToString(modWheelTarget)) << "\""
       << '}';
@@ -120,6 +122,12 @@ std::optional<SessionPrefs> SessionPrefs::fromJson(const std::string& json)
             p.velCurve = *c;
     if (auto b = findBoolField(json, "openReviewAfterImport"))
         p.openReviewAfterImport = *b;
+    // Added in v1.1: missing -> Chromatic from MIDI 36 (new default); legacy names accepted.
+    if (auto s = findStringField(json, "unpitchedFallback"))
+        if (auto f = unpitchedFallbackFromString(*s))
+            p.unpitchedFallback = *f;
+    if (auto n = findNumberField(json, "unpitchedStartNote"))
+        p.unpitchedStartNote = std::clamp(static_cast<int>(std::lround(*n)), 0, 127);
     if (auto n = findNumberField(json, "pitchBendRangeSemis"))
         p.pitchBendRangeSemis = static_cast<float>(std::max(0.0, *n));
     if (auto s = findStringField(json, "modWheelTarget"))

@@ -467,6 +467,27 @@ void writeSample(JsonWriter& w, const SampleRef& s)
     writeOptionalInt(w, "channels", s.channels);
     writeOptionalDouble(w, "detectedPitchHz", s.detectedPitchHz);
     writeOptionalInt(w, "detectedRootKey", s.detectedRootKey);
+    // Pitch-detection metadata (v1.1; optional, ignored by older readers)
+    if (s.pitchSource)
+    {
+        w.key("pitchSource");
+        w.stringVal(PatchStore::pitchSourceToString(*s.pitchSource));
+    }
+    if (s.pitchConfidence)
+    {
+        w.key("pitchConfidence");
+        w.numberVal(std::round(static_cast<double>(*s.pitchConfidence) * 1000.0) / 1000.0);
+    }
+    if (s.detectedCents)
+    {
+        w.key("detectedCents");
+        w.numberVal(std::round(static_cast<double>(*s.detectedCents) * 100.0) / 100.0);
+    }
+    if (s.pitchSource || s.pitchMismatch)
+    {
+        w.key("pitchMismatch");
+        w.boolVal(s.pitchMismatch);
+    }
     writeOptionalInt64(w, "loopStart", s.loopStart);
     writeOptionalInt64(w, "loopEnd", s.loopEnd);
     w.endObject();
@@ -539,6 +560,17 @@ SampleRef readSample(const JsonValue& v)
     if (auto* x = v.find("channels")) if (auto n = x->asInt()) s.channels = *n;
     if (auto* x = v.find("detectedPitchHz")) if (auto n = x->asNumber()) s.detectedPitchHz = *n;
     if (auto* x = v.find("detectedRootKey")) if (auto n = x->asInt()) s.detectedRootKey = *n;
+    // Missing (pre-v1.1 patches) or unknown -> unset / false.
+    if (auto* x = v.find("pitchSource"))
+        if (auto str = x->asString())
+            s.pitchSource = PatchStore::pitchSourceFromString(*str);
+    if (auto* x = v.find("pitchConfidence"))
+        if (auto n = x->asNumber())
+            s.pitchConfidence = static_cast<float>(std::clamp(*n, 0.0, 1.0));
+    if (auto* x = v.find("detectedCents"))
+        if (auto n = x->asNumber())
+            s.detectedCents = static_cast<float>(std::clamp(*n, -100.0, 100.0));
+    if (auto* x = v.find("pitchMismatch")) if (auto b = x->asBool()) s.pitchMismatch = *b;
     if (auto* x = v.find("loopStart")) if (auto n = x->asInt64()) s.loopStart = *n;
     if (auto* x = v.find("loopEnd")) if (auto n = x->asInt64()) s.loopEnd = *n;
     return s;
@@ -691,6 +723,25 @@ std::optional<RoundRobinMode> PatchStore::roundRobinModeFromString(const std::st
 {
     if (s == "cycle" || s == "Cycle") return RoundRobinMode::Cycle;
     if (s == "random" || s == "Random") return RoundRobinMode::Random;
+    return std::nullopt;
+}
+
+std::string PatchStore::pitchSourceToString(PitchSource p)
+{
+    switch (p)
+    {
+        case PitchSource::Filename: return "filename";
+        case PitchSource::Detected: return "detected";
+        case PitchSource::Unpitched: break;
+    }
+    return "unpitched";
+}
+
+std::optional<PitchSource> PatchStore::pitchSourceFromString(const std::string& s)
+{
+    if (s == "filename") return PitchSource::Filename;
+    if (s == "detected") return PitchSource::Detected;
+    if (s == "unpitched" || s == "spread") return PitchSource::Unpitched;
     return std::nullopt;
 }
 

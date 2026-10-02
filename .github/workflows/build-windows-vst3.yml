@@ -32,14 +32,14 @@ jobs:
         run: >
           cmake --build build
           --config Release
-          --target AutoMapperTests PitchDetectorTests DspVoiceTests PatchStoreTests SessionPrefsTests RelocatorTests RoundRobinTests SourceEncodingTests
+          --target AutoMapperTests PitchDetectorTests DspVoiceTests PatchStoreTests SessionPrefsTests RelocatorTests RoundRobinTests PitchMappingTests SourceEncodingTests
           --parallel
 
       - name: Run unit tests
         shell: pwsh
         run: |
           $failed = 0
-          foreach ($t in @("AutoMapperTests","PitchDetectorTests","DspVoiceTests","PatchStoreTests","SessionPrefsTests","RelocatorTests","RoundRobinTests","SourceEncodingTests")) {
+          foreach ($t in @("AutoMapperTests","PitchDetectorTests","DspVoiceTests","PatchStoreTests","SessionPrefsTests","RelocatorTests","RoundRobinTests","PitchMappingTests","SourceEncodingTests")) {
             $exe = Join-Path "build" "Release" "$t.exe"
             if (-not (Test-Path $exe)) { $exe = Join-Path "build" "$t.exe" }
             Write-Host "=== $t ==="

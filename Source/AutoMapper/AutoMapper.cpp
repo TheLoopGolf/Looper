@@ -14,14 +14,23 @@ struct WorkingSample
     const SampleRef* ref = nullptr;
     FilenameTokens tokens;
     int rootKey = 60;
-    PitchSource source = PitchSource::Spread;
+    PitchSource source = PitchSource::Unpitched;
     float confidence = 0.0f;
     float tuneCents = 0.0f;
     std::optional<PitchAnalysis> pitch;
     std::optional<int> velocityHint; // unset → treat as mid later for sorting
     int rrIndex = 0;
     std::vector<std::string> warnings;
+    std::optional<PitchMismatch> mismatch;
+    std::optional<int> filenameNote;
+    bool filenameOverridden = false;
+    bool chromatic = false;          // unpitched, placed by the chromatic fallback
 };
+
+bool usablePitch(const std::optional<PitchAnalysis>& a)
+{
+    return a && a->analysed && !a->unpitched && a->midiNote >= 0 && a->midiNote <= 127;
+}
 
 int midpointFloor(int a, int b)
 {
@@ -117,33 +126,60 @@ std::string formatCents(float cents)
 
 } // namespace
 
-std::string describePitch(const SampleReview& r)
+std::string describeInterval(int semitones)
+{
+    const int mag = semitones < 0 ? -semitones : semitones;
+    const std::string dir = semitones < 0 ? "lower" : "higher";
+    if (mag == 0)
+        return "the same";
+    if (mag % 12 == 0)
+    {
+        const int oct = mag / 12;
+        return (oct == 1 ? std::string("an octave ") : std::to_string(oct) + " octaves ") + dir;
+    }
+    return std::to_string(mag) + (mag == 1 ? " semitone " : " semitones ") + dir;
+}
+
+std::string describePitch(const SampleReview& r, bool middleCIsC4)
 {
     const int pct = static_cast<int>(std::lround(r.confidence * 100.0f));
+    const auto name = [middleCIsC4](int n) { return midiToNoteName(n, middleCIsC4); };
     switch (r.source)
     {
         case PitchSource::Filename:
-            return "Filename " + midiToNoteName(r.rootKey);
+            return "Filename " + name(r.rootKey);
         case PitchSource::Detected:
         {
             const float cents = r.pitch ? r.pitch->cents : -r.tuneCents;
-            return "Detected " + midiToNoteName(r.rootKey) + " (" + formatCents(cents) + ") "
-                 + std::to_string(pct) + "%";
+            std::string out = "Detected " + name(r.rootKey) + " (" + formatCents(cents) + ") "
+                            + std::to_string(pct) + "%";
+            if (r.filenameOverridden && r.filenameNote)
+                out += " (filename " + name(*r.filenameNote) + " overridden)";
+            return out;
         }
-        case PitchSource::Spread:
+        case PitchSource::Unpitched:
             break;
     }
     if (r.pitch && r.pitch->analysed)
-        return "Unpitched (" + r.pitch->reason + ") \xE2\x86\x92 " + midiToNoteName(r.rootKey);
-    return "No pitch \xE2\x86\x92 " + midiToNoteName(r.rootKey);
+        return "Unpitched (" + r.pitch->reason + ") \xE2\x86\x92 " + name(r.rootKey);
+    return "No pitch \xE2\x86\x92 " + name(r.rootKey);
+}
+
+bool AutoMapper::canUseDetected(const SampleReview& r)
+{
+    return r.source == PitchSource::Filename && r.mismatch.has_value() && usablePitch(r.pitch);
 }
 
 AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOptions opt,
                               const PitchAnalysisMap* analyses)
 {
     AutoMapResult result;
+    result.middleCIsC4 = opt.middleCIsC4;
     if (samples.empty())
         return result;
+
+    const auto name = [&opt](int n) { return midiToNoteName(n, opt.middleCIsC4); };
+    const bool chromaticFallback = opt.unpitchedFallback == AutoMapOptions::UnpitchedFallback::Chromatic;
 
     std::vector<WorkingSample> work;
     work.reserve(samples.size());
@@ -153,40 +189,74 @@ AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOpti
         WorkingSample w;
         w.ref = &s;
         const std::string nameForParse = s.path.empty() ? s.displayName : s.path;
-        w.tokens = parseFilenameTokens(nameForParse.empty() ? s.displayName : nameForParse);
+        w.tokens = parseFilenameTokens(nameForParse.empty() ? s.displayName : nameForParse,
+                                       opt.middleCIsC4);
+
+        if (analyses)
+            if (const auto it = analyses->find(s.id); it != analyses->end() && it->second.analysed)
+                w.pitch = it->second;
+        const bool detectedOk = usablePitch(w.pitch);
 
         if (w.tokens.midiNote)
+        {
+            w.filenameNote = *w.tokens.midiNote;
+
+            // Filename/audio mismatch: only confident detections, >= 1 semitone apart.
+            if (detectedOk && w.pitch->confidence >= opt.mismatchMinConfidence
+                && w.pitch->midiNote != *w.tokens.midiNote)
+            {
+                PitchMismatch mm;
+                mm.filenameNote = *w.tokens.midiNote;
+                mm.detectedNote = w.pitch->midiNote;
+                mm.semitones = mm.detectedNote - mm.filenameNote;
+                mm.confidence = w.pitch->confidence;
+                mm.octave = mm.semitones % 12 == 0;
+                mm.text = "Filename " + name(mm.filenameNote) + ", audio sounds "
+                        + (mm.octave ? describeInterval(mm.semitones) + " (" + name(mm.detectedNote) + ")"
+                                     : name(mm.detectedNote));
+                w.mismatch = mm;
+            }
+        }
+
+        const bool overrideFilename = w.tokens.midiNote && detectedOk
+                                   && opt.useDetectedFor.count(s.id) > 0;
+
+        if (w.tokens.midiNote && !overrideFilename)
         {
             w.rootKey = *w.tokens.midiNote;
             w.source = PitchSource::Filename;
             w.confidence = 0.95f;
+            if (w.mismatch)
+                w.warnings.push_back(w.mismatch->text); // filename still wins; no auto change
+        }
+        else if (detectedOk)
+        {
+            w.rootKey = w.pitch->midiNote;
+            w.source = PitchSource::Detected;
+            w.confidence = w.pitch->confidence;
+            w.filenameOverridden = overrideFilename;
+            if (opt.applyDetectedFineTune)
+                w.tuneCents = -w.pitch->cents; // sample is +x ct sharp → play it x ct lower
+            if (w.confidence < opt.lowConfidenceWarnBelow)
+            {
+                w.warnings.push_back("Low pitch-detection confidence ("
+                                     + std::to_string(static_cast<int>(std::lround(w.confidence * 100.0f)))
+                                     + "%); check root key");
+            }
         }
         else
         {
-            if (analyses)
-                if (const auto it = analyses->find(s.id); it != analyses->end() && it->second.analysed)
-                    w.pitch = it->second;
-
-            if (w.pitch && !w.pitch->unpitched && w.pitch->midiNote >= 0 && w.pitch->midiNote <= 127)
+            w.source = PitchSource::Unpitched;
+            if (chromaticFallback)
             {
-                w.rootKey = w.pitch->midiNote;
-                w.source = PitchSource::Detected;
-                w.confidence = w.pitch->confidence;
-                if (opt.applyDetectedFineTune)
-                    w.tuneCents = -w.pitch->cents; // sample is +x ct sharp → play it x ct lower
-                if (w.confidence < opt.lowConfidenceWarnBelow)
-                {
-                    w.warnings.push_back("Low pitch-detection confidence ("
-                                         + std::to_string(static_cast<int>(std::lround(w.confidence * 100.0f)))
-                                         + "%); check root key");
-                }
+                // Key assigned below (drum-kit spread); expected for percussion → no warning.
+                w.chromatic = true;
+                w.confidence = w.pitch ? w.pitch->confidence : 0.0f;
             }
             else
             {
-                // Unpitched fallback (v1: equal spread + warn) → default root (middle C);
-                // RR siblings share this root.
+                // Legacy "equal spread + warn": default root (middle C); RR siblings share it.
                 w.rootKey = 60;
-                w.source = PitchSource::Spread;
                 w.confidence = 0.25f;
                 if (w.pitch)
                     w.warnings.push_back("No note in filename and audio is unpitched ("
@@ -199,6 +269,57 @@ AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOpti
         w.velocityHint = w.tokens.velocityHint;
         w.rrIndex = w.tokens.rrIndex.value_or(0);
         work.push_back(std::move(w));
+    }
+
+    // --- Chromatic (drum-kit) placement of unpitched sounds ---
+    std::set<int> chromaticKeys;
+    {
+        std::set<int> used;
+        for (const auto& w : work)
+            if (!w.chromatic)
+                used.insert(w.rootKey);
+
+        // Velocity layers / RR alternates of one sound share a group (and so a key).
+        std::map<std::string, std::vector<WorkingSample*>> groups;
+        for (auto& w : work)
+            if (w.chromatic)
+                groups[layerGroupName(w.tokens)].push_back(&w);
+
+        std::vector<std::pair<std::string, std::vector<WorkingSample*>*>> order;
+        for (auto& [g, members] : groups)
+            order.emplace_back(g, &members);
+        std::sort(order.begin(), order.end(), [](const auto& a, const auto& b) {
+            if (naturalLess(a.first, b.first)) return true;
+            if (naturalLess(b.first, a.first)) return false;
+            return a.first < b.first;
+        });
+
+        const int start = std::clamp(opt.unpitchedStartNote, 0, 127);
+        int up = start;
+        int down = start - 1;
+        for (auto& [g, members] : order)
+        {
+            while (up <= 127 && used.count(up)) ++up;
+            int key = -1;
+            if (up <= 127)
+                key = up++;
+            else
+            {
+                while (down >= 0 && used.count(down)) --down;
+                if (down >= 0) key = down--;
+            }
+            const bool outOfKeys = key < 0;
+            if (outOfKeys)
+                key = 127;
+            used.insert(key);
+            chromaticKeys.insert(key);
+            for (auto* m : *members)
+            {
+                m->rootKey = key;
+                if (outOfKeys)
+                    m->warnings.push_back("No free key left for unpitched sound; stacked on " + name(key));
+            }
+        }
     }
 
     // Duplicate (root, vel, rr) detection
@@ -219,11 +340,31 @@ AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOpti
         }
     }
 
-    // Collect unique roots
+    // Key ranges: pitched (and legacy fixed-root) roots split the keyboard at midpoints;
+    // chromatic drum keys are single keys and pitched spans are clipped around their block.
     std::vector<int> roots;
     for (const auto& w : work)
-        roots.push_back(w.rootKey);
-    const auto keyRanges = keyRangesForRoots(roots, opt.preferFullKeyboardSpan);
+        if (!w.chromatic)
+            roots.push_back(w.rootKey);
+    auto keyRanges = keyRangesForRoots(roots, opt.preferFullKeyboardSpan);
+    if (!chromaticKeys.empty())
+    {
+        const int uLo = *chromaticKeys.begin();
+        const int uHi = *chromaticKeys.rbegin();
+        for (auto& [root, range] : keyRanges)
+        {
+            if (root < uLo)
+                range.second = std::min(range.second, uLo - 1);
+            else if (root > uHi)
+                range.first = std::max(range.first, uHi + 1);
+            else
+                range = {root, root}; // pitched root inside the drum block
+            if (range.first > range.second)
+                range = {root, root};
+        }
+        for (int k : chromaticKeys)
+            keyRanges[k] = {k, k};
+    }
 
     // Group by root for velocity layering
     std::map<int, std::vector<WorkingSample*>> byRoot;
@@ -327,6 +468,10 @@ AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOpti
         rev.rootKey = w.rootKey;
         rev.tuneCents = w.tuneCents;
         rev.pitch = w.pitch;
+        rev.mismatch = w.mismatch;
+        rev.filenameNote = w.filenameNote;
+        rev.filenameOverridden = w.filenameOverridden;
+        rev.chromaticKey = w.chromatic;
         result.reviews.push_back(rev);
     }
 
@@ -345,6 +490,35 @@ AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOpti
     }
 
     return result;
+}
+
+void applyPitchMetadata(std::vector<SampleRef>& refs, const AutoMapResult& result)
+{
+    for (auto& ref : refs)
+    {
+        const auto it = std::find_if(result.reviews.begin(), result.reviews.end(),
+                                     [&](const SampleReview& r) { return r.sampleId == ref.id; });
+        if (it == result.reviews.end())
+            continue;
+        ref.pitchSource = it->source;
+        ref.pitchMismatch = it->mismatch.has_value();
+        if (it->pitch && it->pitch->analysed)
+        {
+            ref.pitchConfidence = it->pitch->confidence;
+            if (usablePitch(it->pitch))
+            {
+                ref.detectedPitchHz = it->pitch->f0Hz;
+                ref.detectedRootKey = it->pitch->midiNote;
+                ref.detectedCents = it->pitch->cents;
+            }
+            else
+            {
+                ref.detectedPitchHz.reset();
+                ref.detectedRootKey.reset();
+                ref.detectedCents.reset();
+            }
+        }
+    }
 }
 
 } // namespace looper

@@ -53,10 +53,18 @@ public:
         pendingRefs_.clear();
     }
 
+    /**
+     * "Use detected" from the Review screen: re-map the pending import with this sample's
+     * confident detection replacing its filename note. Returns false if not applicable.
+     */
+    bool useDetectedPitch(const std::string& sampleId);
+
     void storeLastReview(AutoMapResult result, std::vector<SampleRef> refs)
     {
         lastReview_ = std::move(result);
         lastReviewRefs_ = std::move(refs);
+        lastOptions_ = pendingOptions_;
+        lastAnalyses_ = pendingAnalyses_;
     }
 
     bool hasLastReview() const { return lastReview_.has_value(); }
@@ -69,6 +77,8 @@ public:
         {
             pending_ = *lastReview_;
             pendingRefs_ = lastReviewRefs_;
+            pendingOptions_ = lastOptions_;
+            pendingAnalyses_ = lastAnalyses_;
         }
     }
 
@@ -87,6 +97,8 @@ private:
     std::vector<SampleRef> pendingRefs_;
     std::optional<AutoMapResult> lastReview_;
     std::vector<SampleRef> lastReviewRefs_;
+    AutoMapOptions pendingOptions_, lastOptions_;
+    PitchAnalysisMap pendingAnalyses_, lastAnalyses_;
     PitchAnalysisMap pitchCache_;
 };
 

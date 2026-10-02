@@ -15,6 +15,12 @@ LooperAudioProcessorEditor::LooperAudioProcessorEditor (LooperAudioProcessor& p)
     relocateView_.setCloseCallback ([this] { showMain(); });
     reviewMapView_.setAcceptCallback ([this] { handleAcceptMap(); });
     reviewMapView_.setBackCallback ([this] { handleBackToPlay(); });
+    reviewMapView_.setUseDetectedCallback ([this] (const std::string& sampleId) {
+        auto& ic = processorRef_.importController();
+        if (ic.useDetectedPitch (sampleId))
+            if (const auto* pending = ic.pendingResult())
+                reviewMapView_.setResult (*pending, ic.pendingSampleRefs());
+    });
     settingsView_.setBackCallback ([this] { showMain(); });
     setSize (1000, 680);
     showMain();

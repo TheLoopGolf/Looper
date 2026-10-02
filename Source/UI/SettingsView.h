@@ -68,8 +68,10 @@ private:
     PrefRow engineRows_[5];
 
     // Mapping
-    juce::ComboBox midCBox_, spanBox_, rrBox_, velBox_, unpitchedBox_, reviewBox_;
-    PrefRow mappingRows_[6];
+    juce::ComboBox midCBox_, spanBox_, rrBox_, velBox_, unpitchedBox_, startNoteBox_, reviewBox_;
+    PrefRow mappingRows_[7];
+    /** Note-name items (start key, fixed-root label) follow the C4=60 / C3=60 convention. */
+    void refreshNoteLabels(bool middleCIsC4);
     std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> rrAttachment_;
 
     // MIDI

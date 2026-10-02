@@ -89,6 +89,11 @@ if(LOOPER_BUILD_TESTS)
     target_link_libraries(RoundRobinTests PRIVATE LooperDsp LooperPatch)
     add_test(NAME RoundRobinTests COMMAND RoundRobinTests)
 
+    # Unpitched drum-key fallback, filename/audio mismatch, C3=60 naming, pitch metadata in patches
+    add_executable(PitchMappingTests Tests/PitchMappingTests.cpp)
+    target_link_libraries(PitchMappingTests PRIVATE LooperAutoMapper LooperPatch)
+    add_test(NAME PitchMappingTests COMMAND PitchMappingTests)
+
     # Mojibake guard: non-ASCII UI text must go through Source/UI/Glyphs.h
     add_executable(SourceEncodingTests Tests/SourceEncodingTests.cpp)
     target_compile_definitions(SourceEncodingTests PRIVATE

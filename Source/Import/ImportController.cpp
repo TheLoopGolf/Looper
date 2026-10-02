@@ -146,30 +146,37 @@ bool ImportController::importFiles(const juce::Array<juce::File>& files, SampleP
     }
     if (refs.empty()) { clearPending(); return false; }
 
-    // Pitch-detect samples whose filename has no note token (filename always wins, so
-    // named samples are skipped to keep imports fast). Runs on the calling thread;
-    // ~ a few ms per sample.
+    // Pitch-detect every sample (cached per id, ~3 ms each). Samples without a filename
+    // note use the result for their root key; named samples only for the filename/audio
+    // mismatch flag (filename still wins). Runs on the calling (message) thread.
     PitchAnalysisMap analyses;
     for (auto& ref : refs) {
-        const std::string name = ref.path.empty() ? ref.displayName : ref.path;
-        if (parseFilenameTokens(name).midiNote)
-            continue;
         const auto buffer = pool.getBuffer(ref.id);
         if (!buffer)
             continue;
-        const auto analysis = analysePitch(ref.id, *buffer);
-        analyses[ref.id] = analysis;
-        if (!analysis.unpitched) {
-            ref.detectedPitchHz = analysis.f0Hz;
-            ref.detectedRootKey = analysis.midiNote;
-        } else {
-            ref.detectedPitchHz.reset();
-            ref.detectedRootKey.reset();
-        }
+        analyses[ref.id] = analysePitch(ref.id, *buffer);
     }
 
     pendingRefs_ = std::move(refs);
-    pending_ = AutoMapper::map(pendingRefs_, options, &analyses);
+    pendingOptions_ = options;
+    pendingAnalyses_ = std::move(analyses);
+    pending_ = AutoMapper::map(pendingRefs_, pendingOptions_, &pendingAnalyses_);
+    applyPitchMetadata(pendingRefs_, *pending_);
+    return true;
+}
+
+bool ImportController::useDetectedPitch(const std::string& sampleId)
+{
+    if (!pending_)
+        return false;
+    const auto& reviews = pending_->reviews;
+    const auto it = std::find_if(reviews.begin(), reviews.end(),
+                                 [&](const SampleReview& r) { return r.sampleId == sampleId; });
+    if (it == reviews.end() || !AutoMapper::canUseDetected(*it))
+        return false;
+    pendingOptions_.useDetectedFor.insert(sampleId);
+    pending_ = AutoMapper::map(pendingRefs_, pendingOptions_, &pendingAnalyses_);
+    applyPitchMetadata(pendingRefs_, *pending_);
     return true;
 }
 

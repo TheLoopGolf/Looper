@@ -16,6 +16,9 @@ using PatchParams = std::unordered_map<std::string, double>;
 /**
  * Patch JSON sidecar (schema v1).
  * Samples are referenced by relative paths (preferred) or absolute; audio is never embedded.
+ * Optional per-sample pitch metadata (pitchSource, pitchConfidence, detectedCents,
+ * detectedPitchHz, detectedRootKey, pitchMismatch) is additive: the schema stays 1 so older
+ * builds still open these patches (they ignore unknown keys), and missing keys load as unset.
  */
 struct Patch
 {
@@ -95,6 +98,9 @@ public:
     /** "cycle" / "random" (map key "roundRobinMode"; missing or unknown loads as Cycle). */
     static std::string roundRobinModeToString(RoundRobinMode m);
     static std::optional<RoundRobinMode> roundRobinModeFromString(const std::string& s);
+    /** Sample "pitchSource": "filename" / "detected" / "unpitched" (unknown -> nullopt). */
+    static std::string pitchSourceToString(PitchSource p);
+    static std::optional<PitchSource> pitchSourceFromString(const std::string& s);
 };
 
 } // namespace looper

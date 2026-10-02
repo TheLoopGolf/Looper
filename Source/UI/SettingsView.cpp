@@ -2,6 +2,7 @@
 #include "Glyphs.h"
 #include "LooperLookAndFeel.h"
 #include "../Plugin/PluginProcessor.h"
+#include "../AutoMapper/FilenameTokens.h"
 
 namespace looper {
 namespace {
@@ -9,6 +10,17 @@ juce::Colour kPanel()   { return Palette::bgRaised(); }
 juce::Colour kAccent()  { return Palette::fairway(); }
 juce::Colour kText()    { return Palette::text(); }
 juce::Colour kMuted()   { return Palette::muted(); }
+
+// Drum-key start choices (MIDI); ComboBox ids are midi + 1 (ids must be non-zero).
+constexpr int kStartNoteLo = 24;
+constexpr int kStartNoteHi = 84;
+constexpr int kUnpitchedChromaticId = 1;
+constexpr int kUnpitchedFixedId = 2;
+
+juce::String noteLabel(int midi, bool c4)
+{
+    return juce::String(looper::midiToNoteName(midi, c4));
+}
 } // namespace
 
 void SettingsView::styleCombo(juce::ComboBox& c)
@@ -118,8 +130,9 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
 
     // --- Mapping ---
     midCBox_.addItem("C4 = 60", 1);
+    midCBox_.addItem("C3 = 60", 2);
     midCBox_.setSelectedId(1, juce::dontSendNotification);
-    // locked for v1
+    midCBox_.onChange = [this] { applyMappingFromUi(); };
 
     spanBox_.addItem("Full keyboard 0" + glyph::enDash() + "127", 1);
     spanBox_.addItem("Natural span only", 2);
@@ -137,21 +150,37 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     velBox_.addItem("Hard", 3);
     velBox_.onChange = [this] { applyMappingFromUi(); };
 
-    unpitchedBox_.addItem("Equal spread + warn", 1);
-    unpitchedBox_.setSelectedId(1, juce::dontSendNotification);
+    // "Fixed root" is the pre-v1.1 "equal spread + warn" behaviour (root middle C, shared span).
+    unpitchedBox_.addItem("Spread chromatically", kUnpitchedChromaticId);
+    unpitchedBox_.addItem("Fixed root C4, full range", kUnpitchedFixedId);
+    unpitchedBox_.setSelectedId(kUnpitchedChromaticId, juce::dontSendNotification);
+    unpitchedBox_.onChange = [this] { applyMappingFromUi(); };
+
+    for (int n = kStartNoteLo; n <= kStartNoteHi; ++n)
+        startNoteBox_.addItem(noteLabel(n, true), n + 1);
+    startNoteBox_.setSelectedId(36 + 1, juce::dontSendNotification);
+    startNoteBox_.onChange = [this] { applyMappingFromUi(); };
 
     reviewBox_.addItem("On", 1);
     reviewBox_.addItem("Off", 2);
     reviewBox_.onChange = [this] { applyMappingFromUi(); };
 
-    initRow(mappingRows_[0], "Middle C convention", "Scientific pitch; matches most modern packs", &midCBox_);
+    initRow(mappingRows_[0], "Middle C convention",
+            "Filename notes + labels. C4 = 60 scientific (default); C3 = 60 Yamaha / Cubase style",
+            &midCBox_);
     initRow(mappingRows_[1], "Key span", "Or natural span only (roots' neighborhood)", &spanBox_);
     initRow(mappingRows_[2], "Round-robin mode",
             "Cycle in order, or random (no back-to-back repeats). Saved per patch; also on main view",
             &rrBox_);
     initRow(mappingRows_[3], "Velocity curve", glyph::spaced("Soft / linear / hard", glyph::emDash(), "global feel"), &velBox_);
-    initRow(mappingRows_[4], "Unpitched fallback", "When filename + detect both fail", &unpitchedBox_);
-    initRow(mappingRows_[5], "Open review after import", "If any warning/confidence < 0.8", &reviewBox_);
+    initRow(mappingRows_[4], "No clear pitch",
+            glyph::spaced("No filename note, audio unpitched", glyph::emDash(),
+                          "chromatic = one drum key per sound (layers / RR share it)"),
+            &unpitchedBox_);
+    initRow(mappingRows_[5], "Unpitched start key",
+            "First drum key, then upward in filename order; skips keys used by pitched samples",
+            &startNoteBox_);
+    initRow(mappingRows_[6], "Open review after import", "If any warning/confidence < 0.8", &reviewBox_);
 
     // --- MIDI ---
     bendBox_.addItem(glyph::plusMinus() + "2 semitones", 1);
@@ -346,7 +375,8 @@ void SettingsView::refreshFromProcessor()
     softClipBox_.setSelectedId(p.masterSoftClip ? 2 : 1, juce::dontSendNotification);
     filterBox_.setSelectedId(p.defaultFilterType + 1, juce::dontSendNotification);
 
-    midCBox_.setSelectedId(1, juce::dontSendNotification);
+    midCBox_.setSelectedId(p.middleCIsC4 ? 1 : 2, juce::dontSendNotification);
+    refreshNoteLabels(p.middleCIsC4);
     spanBox_.setSelectedId(p.preferFullKeyboardSpan ? 1 : 2, juce::dontSendNotification);
     switch (p.velCurve)
     {
@@ -354,7 +384,11 @@ void SettingsView::refreshFromProcessor()
         case VelCurve::Hard: velBox_.setSelectedId(3, juce::dontSendNotification); break;
         case VelCurve::Linear: velBox_.setSelectedId(1, juce::dontSendNotification); break;
     }
-    unpitchedBox_.setSelectedId(1, juce::dontSendNotification);
+    const bool chromatic = p.unpitchedFallback == AutoMapOptions::UnpitchedFallback::Chromatic;
+    unpitchedBox_.setSelectedId(chromatic ? kUnpitchedChromaticId : kUnpitchedFixedId, juce::dontSendNotification);
+    startNoteBox_.setSelectedId(juce::jlimit(kStartNoteLo, kStartNoteHi, p.unpitchedStartNote) + 1,
+                                juce::dontSendNotification);
+    startNoteBox_.setEnabled(chromatic);
     reviewBox_.setSelectedId(p.openReviewAfterImport ? 1 : 2, juce::dontSendNotification);
 
     bendBox_.setSelectedId(1, juce::dontSendNotification);
@@ -388,7 +422,14 @@ void SettingsView::applyEngineFromUi()
 void SettingsView::applyMappingFromUi()
 {
     auto prefs = processor_.sessionPrefs();
-    prefs.middleCIsC4 = true;
+    prefs.middleCIsC4 = midCBox_.getSelectedId() != 2;
+    prefs.unpitchedFallback = unpitchedBox_.getSelectedId() == kUnpitchedFixedId
+                                  ? AutoMapOptions::UnpitchedFallback::FixedRoot
+                                  : AutoMapOptions::UnpitchedFallback::Chromatic;
+    if (const int sid = startNoteBox_.getSelectedId(); sid > 0)
+        prefs.unpitchedStartNote = sid - 1;
+    startNoteBox_.setEnabled(prefs.unpitchedFallback == AutoMapOptions::UnpitchedFallback::Chromatic);
+    refreshNoteLabels(prefs.middleCIsC4);
     prefs.preferFullKeyboardSpan = spanBox_.getSelectedId() != 2;
     // Round-robin mode is per patch (APVTS "rrMode" via rrAttachment_), not a session pref.
     switch (velBox_.getSelectedId())
@@ -399,6 +440,24 @@ void SettingsView::applyMappingFromUi()
     }
     prefs.openReviewAfterImport = reviewBox_.getSelectedId() != 2;
     processor_.applySessionPrefs(prefs);
+}
+
+void SettingsView::refreshNoteLabels(bool middleCIsC4)
+{
+    // getSelectedId() returns 0 once the shown text no longer matches, so read ids first.
+    const int startId = startNoteBox_.getSelectedId();
+    const int fallbackId = unpitchedBox_.getSelectedId();
+    for (int n = kStartNoteLo; n <= kStartNoteHi; ++n)
+    {
+        auto label = noteLabel(n, middleCIsC4);
+        if (n == 36)
+            label << " (kick)";
+        startNoteBox_.changeItemText(n + 1, label);
+    }
+    unpitchedBox_.changeItemText(kUnpitchedFixedId, "Fixed root " + noteLabel(60, middleCIsC4) + ", full range");
+    // ComboBox caches the shown text; re-select to repaint with the new item text.
+    if (startId > 0) startNoteBox_.setSelectedId(startId, juce::dontSendNotification);
+    if (fallbackId > 0) unpitchedBox_.setSelectedId(fallbackId, juce::dontSendNotification);
 }
 
 void SettingsView::applyMidiFromUi()
@@ -522,7 +581,7 @@ void SettingsView::resized()
             layoutRows(body, engineRows_, 5);
             break;
         case Tab::Mapping:
-            layoutRows(body, mappingRows_, 6);
+            layoutRows(body, mappingRows_, 7);
             break;
         case Tab::Midi:
             layoutRows(body, midiRows_, 3);

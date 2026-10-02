@@ -106,10 +106,23 @@ Ignore noise tokens: `wav`, `sample`, `mapped`, `normalized`, `48k`, `24b`, `loo
 - Quantize to nearest MIDI note; store cents offset into `tuneCents` suggestion (user can snap to 0)
 - **Implemented** (`Source/AutoMapper/PitchDetector.*`): YIN threshold 0.12, ~70 ms post-onset
   skip, up to 9 frames median, 27.5 Hz–4.2 kHz, confidence = (1 − 2·aperiodicity) × frame
-  agreement, unpitched below 0.5, review warning below 0.8. `ImportController` analyses the
-  decoded buffer only when the filename has no note; `AutoMapper::map(samples, opt, &analyses)`
-  consumes the results, writes `Zone::tuneCents = −cents` (option `applyDetectedFineTune`), and
-  records `SampleReview::pitch` for the Review table (`describePitch`).
+  agreement, unpitched below 0.5, review warning below 0.8. `ImportController` analyses every
+  decoded buffer (cached per sample id); `AutoMapper::map(samples, opt, &analyses)` consumes the
+  results, writes `Zone::tuneCents = −cents` (option `applyDetectedFineTune`), and records
+  `SampleReview::pitch` for the Review table (`describePitch`).
+- **Mismatch flag (v1.1):** for filename-named samples, a detection with confidence ≥
+  `mismatchMinConfidence` (0.8) on a different nearest note sets `SampleReview::mismatch` and a
+  warning (`Filename C4, audio sounds E4`; whole octaves as `an octave lower (C3)`). No automatic
+  change; `AutoMapOptions::useDetectedFor` (Review "Use detected") lets detection win per sample.
+- **Unpitched fallback (v1.1):** `AutoMapOptions::unpitchedFallback` = `Chromatic` (default) or
+  `FixedRoot` (legacy equal-spread + warn, root 60). Chromatic: group unpitched samples by
+  `layerGroupName()` (stem minus velocity / dynamics / RR tokens), order groups with
+  `naturalLess()`, assign consecutive single keys from `unpitchedStartNote` (36) skipping
+  pitched roots (downward from the start once 127 is reached); pitched spans are clipped
+  around the drum block; existing velocity / RR layering then runs per key.
+- **Metadata:** `applyPitchMetadata()` copies source / confidence / cents / Hz / root /
+  mismatch into `SampleRef` → `.looper.json` (`pitchSource`, `pitchConfidence`,
+  `detectedCents`, `detectedPitchHz`, `detectedRootKey`, `pitchMismatch`; all optional).
 
 ### Zone building algorithm
 
@@ -148,7 +161,9 @@ Global summary:
 ```text
 AutoMapResult AutoMapper::map(const std::vector<SampleRef>& samples, AutoMapOptions opt);
 ```
-Options: middle-C convention (C3 vs C4), prefer full-keyboard span, RR mode default, velocity word table.
+Options: middle-C convention (`middleCIsC4`: C4 = 60 default, C3 = 60 shifts filename parsing
+and labels one octave), prefer full-keyboard span, RR mode default, unpitched fallback + start
+key, mismatch confidence, per-sample "use detected".
 
 Deterministic: same inputs → same map (required for tests).
 
@@ -286,7 +301,8 @@ Per-zone params are **not** all host automatable in v1 (edited in map UI, stored
 
 | Topic | v1 default |
 |-------|------------|
-| Middle C convention | C4 = 60 |
+| Middle C convention | C4 = 60 (C3 = 60 selectable) |
+| Unpitched fallback | Chromatic drum keys from MIDI 36 |
 | Key span | Full 0–127 |
 | RR mode | Cycle |
 | Filter env source | Amp ADSR |

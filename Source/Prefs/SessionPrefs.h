@@ -22,11 +22,14 @@ struct SessionPrefs
     int defaultFilterType = 0;          // 0=LP, 1=HP, 2=BP → APVTS filterType
 
     // --- Mapping (next AutoMapper import + map display defaults) ---
-    bool middleCIsC4 = true;            // locked C4=60 for v1
+    bool middleCIsC4 = true;            // C4=60 default; false = C3=60 (filename parse + note labels)
     bool preferFullKeyboardSpan = true;
     bool cycleRrDefault = true;         // Random stubbed / disabled in UI
     VelCurve velCurve = VelCurve::Linear;
     bool openReviewAfterImport = true;
+    /** "No clear pitch" fallback (Settings -> Mapping). Chromatic drum keys by default. */
+    AutoMapOptions::UnpitchedFallback unpitchedFallback = AutoMapOptions::UnpitchedFallback::Chromatic;
+    int unpitchedStartNote = 36;        // MIDI note of the first drum key (GM kick)
 
     // --- MIDI ---
     float pitchBendRangeSemis = 2.0f;
@@ -38,6 +41,8 @@ struct SessionPrefs
         o.middleCIsC4 = middleCIsC4;
         o.preferFullKeyboardSpan = preferFullKeyboardSpan;
         o.cycleRrDefault = cycleRrDefault;
+        o.unpitchedFallback = unpitchedFallback;
+        o.unpitchedStartNote = unpitchedStartNote;
         return o;
     }
 
@@ -57,6 +62,8 @@ struct SessionPrefs
             && cycleRrDefault == o.cycleRrDefault
             && velCurve == o.velCurve
             && openReviewAfterImport == o.openReviewAfterImport
+            && unpitchedFallback == o.unpitchedFallback
+            && unpitchedStartNote == o.unpitchedStartNote
             && near(pitchBendRangeSemis, o.pitchBendRangeSemis)
             && modWheelTarget == o.modWheelTarget;
     }

@@ -7,6 +7,18 @@
 
 namespace looper {
 
+/**
+ * Where a sample's root key came from (AutoMapper + .looper.json "pitchSource").
+ * Spread is the pre-v1.1 name for Unpitched and is kept as an alias for source compatibility.
+ */
+enum class PitchSource
+{
+    Filename,
+    Detected,
+    Unpitched,
+    Spread = Unpitched
+};
+
 struct SampleRef
 {
     std::string id;
@@ -18,6 +30,15 @@ struct SampleRef
     std::optional<int> channels;
     std::optional<double> detectedPitchHz;
     std::optional<int> detectedRootKey;
+    // --- Pitch-detection metadata (all optional; absent in pre-v1.1 patches) ---
+    /** Source of the root key used at import ("filename" / "detected" / "unpitched"). */
+    std::optional<PitchSource> pitchSource;
+    /** YIN confidence 0..1 whenever the audio was analysed (also for filename-named samples). */
+    std::optional<float> pitchConfidence;
+    /** Detected offset of the audio from detectedRootKey in cents (-50..+50). */
+    std::optional<float> detectedCents;
+    /** Confident detection disagrees with the filename note by >= 1 semitone. */
+    bool pitchMismatch = false;
     std::optional<int64_t> loopStart;
     std::optional<int64_t> loopEnd;
 };

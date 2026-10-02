@@ -8,11 +8,20 @@ namespace {
 juce::String pitchLabel (PitchSource s)
 {
     switch (s) {
-        case PitchSource::Filename: return "filename";
-        case PitchSource::Detected: return "detected";
-        case PitchSource::Spread: return "spread";
+        case PitchSource::Filename: return "Filename";
+        case PitchSource::Detected: return "Detected";
+        case PitchSource::Unpitched: return "Unpitched";
     }
     return "?";
+}
+juce::Colour pitchTagColour (PitchSource s)
+{
+    switch (s) {
+        case PitchSource::Filename: return Palette::fairway();
+        case PitchSource::Detected: return Palette::text();
+        case PitchSource::Unpitched: return Palette::brass();
+    }
+    return Palette::muted();
 }
 const Zone* findZone (const InstrumentMap& map, const std::string& id)
 {
@@ -21,6 +30,32 @@ const Zone* findZone (const InstrumentMap& map, const std::string& id)
     return nullptr;
 }
 } // namespace
+
+/** Compact fairway "Use detected" action living (inset) in the "Fix" column of mismatch rows. */
+class ReviewMapView::UseDetectedButton : public juce::Component
+{
+public:
+    explicit UseDetectedButton (ReviewMapView& owner) : owner_ (owner)
+    {
+        button_.setColour (juce::TextButton::buttonColourId, Palette::fairwayDim().withAlpha (0.55f));
+        button_.setColour (juce::TextButton::textColourOffId, Palette::text());
+        button_.setTooltip ("Replace the filename note with the detected note for this sample");
+        // Deferred: the re-map rebuilds the table, which deletes this very component.
+        button_.onClick = [this] {
+            juce::Component::SafePointer<ReviewMapView> safe (&owner_);
+            juce::MessageManager::callAsync ([safe, id = sampleId] {
+                if (safe != nullptr && safe->onUseDetected_) safe->onUseDetected_ (id);
+            });
+        };
+        addAndMakeVisible (button_);
+    }
+    void resized() override { button_.setBounds (getLocalBounds().reduced (6, 2)); }
+    std::string sampleId;
+
+private:
+    ReviewMapView& owner_;
+    juce::TextButton button_ { "Use detected" };
+};
 
 ReviewMapView::ReviewMapView()
 {
@@ -56,20 +91,27 @@ ReviewMapView::ReviewMapView()
     addAndMakeVisible (acceptBtn_);
     addAndMakeVisible (backBtn_);
 
-    table_.getHeader().addColumn ("Sample", 1, 180);
-    table_.getHeader().addColumn ("Source", 2, 80);
-    table_.getHeader().addColumn ("Root", 3, 60);
-    table_.getHeader().addColumn ("Vel", 4, 70);
-    table_.getHeader().addColumn ("RR", 5, 40);
-    table_.getHeader().addColumn ("Key span", 6, 100);
-    table_.getHeader().addColumn ("Confidence", 7, 90);
-    table_.getHeader().addColumn ("Pitch", 8, 230);
+    auto& header = table_.getHeader();
+    header.addColumn ("Sample", colSample, 168);
+    header.addColumn ("Source", colSource, 88);
+    header.addColumn ("Root", colRoot, 52);
+    header.addColumn ("Vel", colVel, 60);
+    header.addColumn ("RR", colRr, 34);
+    header.addColumn ("Key span", colSpan, 84);
+    header.addColumn ("Conf.", colConf, 56);
+    header.addColumn ("Pitch", colPitch, 300);
+    header.addColumn ("Fix", colAction, 96);
+    table_.setRowHeight (26);
     table_.setColour (juce::ListBox::backgroundColourId, Palette::bgSunken());
     table_.setColour (juce::ListBox::outlineColourId, Palette::border());
     addAndMakeVisible (table_);
 
     footer_.setColour (juce::Label::textColourId, Palette::muted());
-    footer_.setText ("Warnings highlight low-confidence / spread rows. Pitch: filename note wins, else YIN detection.", juce::dontSendNotification);
+    footer_.setText (glyph::spaced ("Filename note wins (audio mismatches are flagged)", glyph::middleDot(),
+                                    "else YIN detection") + " " + glyph::middleDot()
+                         + " Unpitched: Settings " + glyph::arrowRight() + " Mapping " + glyph::arrowRight()
+                         + " No clear pitch (default: own drum key each).",
+                     juce::dontSendNotification);
     addAndMakeVisible (footer_);
 }
 
@@ -89,41 +131,82 @@ void ReviewMapView::clear()
 void ReviewMapView::setResult (const AutoMapResult& result, const std::vector<SampleRef>& refs)
 {
     rows_.clear();
+    const bool c4 = result.middleCIsC4;
+    auto note = [c4] (int n) { return juce::String (midiToNoteName (n, c4)); };
     auto nameFor = [&] (const std::string& id) -> juce::String {
         for (const auto& r : refs)
             if (r.id == id)
                 return glyph::utf8 ((r.displayName.empty() ? r.path : r.displayName).c_str());
         return glyph::utf8 (id.c_str());
     };
-    int warns = 0;
+    int warns = 0, unpitched = 0, mismatches = 0;
+    int unpitchedLo = 128, unpitchedHi = -1;
     for (const auto& rev : result.reviews)
     {
         Row row;
+        row.sampleId = rev.sampleId;
         row.sample = nameFor (rev.sampleId);
+        row.kind = rev.source;
         row.source = pitchLabel (rev.source);
-        row.confidence = juce::String (rev.confidence, 2);
-        row.pitch = glyph::utf8 (describePitch (rev).c_str()); // AutoMapper text is UTF-8 (arrows, minus)
-        if (! rev.warnings.empty())
-            row.pitch << "  " << glyph::emDash() << " " << glyph::utf8 (rev.warnings.front().c_str());
+        row.mismatch = rev.mismatch.has_value();
+        row.canUseDetected = AutoMapper::canUseDetected (rev);
+        if (rev.source == PitchSource::Unpitched)
+            row.confidence = "-";
+        else
+            row.confidence = rev.pitch && rev.pitch->analysed ? juce::String (rev.pitch->confidence, 2)
+                                                              : juce::String (rev.confidence, 2);
+        // AutoMapper text is UTF-8 (arrows, minus) -> decode via glyph::utf8
+        if (row.mismatch && rev.source == PitchSource::Filename)
+            row.pitch = glyph::utf8 (rev.mismatch->text.c_str()); // detection % is in Conf.
+        else
+        {
+            row.pitch = glyph::utf8 (describePitch (rev, c4).c_str());
+            if (! rev.warnings.empty())
+                row.pitch << "  " << glyph::emDash() << " " << glyph::utf8 (rev.warnings.front().c_str());
+        }
         if (const Zone* z = findZone (result.map, rev.sampleId))
         {
-            row.root = midiToNoteName (z->rootKey);
+            row.root = note (z->rootKey);
             row.vel = juce::String (z->velLow) + "-" + juce::String (z->velHigh);
             row.rr = z->rrIndex > 0 ? juce::String (z->rrIndex) : "-";
-            row.keySpan = midiToNoteName (z->keyLow) + "-" + midiToNoteName (z->keyHigh);
+            row.keySpan = z->keyLow == z->keyHigh ? note (z->keyLow)
+                                                  : note (z->keyLow) + glyph::enDash() + note (z->keyHigh);
         }
         else
         {
             row.root = "?"; row.vel = "-"; row.rr = "-"; row.keySpan = "-";
         }
-        row.warning = rev.confidence < 0.7f || ! rev.warnings.empty()
-                      || rev.source == PitchSource::Spread;
+        if (rev.source == PitchSource::Unpitched)
+        {
+            ++unpitched;
+            unpitchedLo = juce::jmin (unpitchedLo, rev.rootKey);
+            unpitchedHi = juce::jmax (unpitchedHi, rev.rootKey);
+        }
+        if (row.mismatch && rev.source == PitchSource::Filename) ++mismatches;
+        row.warning = ! rev.warnings.empty()
+                      || (rev.source == PitchSource::Detected && rev.confidence < 0.8f);
         if (row.warning) ++warns;
+        row.sortKey = rev.rootKey;
+        if (const Zone* z = findZone (result.map, rev.sampleId))
+            row.sortKey = z->rootKey * 100000 + z->velLow * 256 + z->rrIndex;
+        else
+            row.sortKey *= 100000;
         rows_.push_back (std::move (row));
     }
+    // Keyboard order (root, velocity layer, RR), then natural filename order
+    std::stable_sort (rows_.begin(), rows_.end(), [] (const Row& a, const Row& b) {
+        if (a.sortKey != b.sortKey) return a.sortKey < b.sortKey;
+        return a.sample.compareNatural (b.sample) < 0;
+    });
     juce::String sum;
     const auto dot = glyph::dotSep();
     sum << "Auto-map review" << dot << (int) rows_.size() << " samples";
+    if (unpitched > 0)
+    {
+        sum << dot << unpitched << " unpitched " << glyph::arrowRight() << " " << note (unpitchedLo);
+        if (unpitchedHi > unpitchedLo) sum << glyph::enDash() << note (unpitchedHi);
+    }
+    if (mismatches > 0) sum << dot << mismatches << " mismatch" << (mismatches == 1 ? "" : "es");
     if (warns > 0) sum << dot << warns << " warning" << (warns == 1 ? "" : "s");
     summary_.setText (sum, juce::dontSendNotification);
     table_.updateContent();
@@ -178,21 +261,63 @@ void ReviewMapView::paintCell (juce::Graphics& g, int row, int col, int w, int h
 {
     if (! juce::isPositiveAndBelow (row, (int) rows_.size())) return;
     const auto& r = rows_[(size_t) row];
+    const juce::Font font (juce::FontOptions (13.0f));
+
+    if (col == colSource)
+    {
+        // Pill tag: fairway = filename, cream = detected, brass = unpitched
+        const auto c = pitchTagColour (r.kind);
+        juce::GlyphArrangement ga;
+        ga.addLineOfText (font, r.source, 0.0f, 0.0f);
+        const float tw = ga.getBoundingBox (0, -1, true).getWidth();
+        auto pill = juce::Rectangle<float> (6.0f, 4.0f, juce::jmin ((float) w - 10.0f, tw + 16.0f), (float) h - 8.0f);
+        g.setColour (c.withAlpha (0.14f));
+        g.fillRoundedRectangle (pill, pill.getHeight() * 0.5f);
+        g.setColour (c.withAlpha (0.55f));
+        g.drawRoundedRectangle (pill, pill.getHeight() * 0.5f, 1.0f);
+        g.setColour (c);
+        g.setFont (font);
+        g.drawText (r.source, pill.toNearestInt(), juce::Justification::centred, true);
+        return;
+    }
+
     juce::String text;
     switch (col) {
-        case 1: text = r.sample; break;
-        case 2: text = r.source; break;
-        case 3: text = r.root; break;
-        case 4: text = r.vel; break;
-        case 5: text = r.rr; break;
-        case 6: text = r.keySpan; break;
-        case 7: text = r.confidence + (r.warning ? " !" : ""); break;
-        case 8: text = r.pitch; break;
+        case colSample: text = r.sample; break;
+        case colRoot: text = r.root; break;
+        case colVel: text = r.vel; break;
+        case colRr: text = r.rr; break;
+        case colSpan: text = r.keySpan; break;
+        case colConf: text = r.confidence + (r.warning ? " !" : ""); break;
+        case colPitch: text = r.pitch; break;
+        case colAction: text = r.mismatch && ! r.canUseDetected ? juce::String ("applied") : juce::String(); break;
         default: break;
     }
-    g.setColour (r.warning ? Palette::sand() : Palette::text());
-    g.setFont (juce::Font (juce::FontOptions (13.0f)));
+    auto colour = r.warning ? Palette::sand() : Palette::text();
+    if (col == colRoot && r.kind == PitchSource::Unpitched) colour = Palette::brass();
+    if (col == colAction) colour = Palette::muted();
+    g.setColour (colour);
+    g.setFont (font);
     g.drawText (text, 6, 0, w - 10, h, juce::Justification::centredLeft, true);
+}
+
+juce::Component* ReviewMapView::refreshComponentForCell (int row, int col, bool, juce::Component* existing)
+{
+    const bool wanted = col == colAction && juce::isPositiveAndBelow (row, (int) rows_.size())
+                        && rows_[(size_t) row].canUseDetected;
+    if (! wanted)
+    {
+        delete existing; // JUCE contract: we own the stale component when returning nullptr
+        return nullptr;
+    }
+    auto* btn = dynamic_cast<UseDetectedButton*> (existing);
+    if (btn == nullptr)
+    {
+        delete existing;
+        btn = new UseDetectedButton (*this);
+    }
+    btn->sampleId = rows_[(size_t) row].sampleId;
+    return btn;
 }
 
 } // namespace looper

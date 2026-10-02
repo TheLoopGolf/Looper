@@ -57,7 +57,7 @@ jobs:
           fi
           if [ -z "$targets" ]; then
             echo "::warning::No *Tests targets discovered; falling back to the known suites"
-            targets="AutoMapperTests PitchDetectorTests DspVoiceTests PatchStoreTests SessionPrefsTests RelocatorTests RoundRobinTests SourceEncodingTests"
+            targets="AutoMapperTests PitchDetectorTests DspVoiceTests PatchStoreTests SessionPrefsTests RelocatorTests RoundRobinTests PitchMappingTests SourceEncodingTests"
           fi
           echo "Test targets: $targets"
           echo "targets=$targets" >> "$GITHUB_OUTPUT"

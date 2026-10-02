@@ -51,6 +51,8 @@ Tests/
   SessionPrefsTests.cpp prefs serialize round-trip
   RelocatorTests.cpp  missing-sample search: case / tail match / ambiguity / cascade / Windows / unicode
   RoundRobinTests.cpp Cycle unchanged, Random no-repeat + uniformity, seeds, no-alloc, patch field
+  PitchMappingTests.cpp drum-key spread (order / skips / shared layers), filename-vs-audio mismatch,
+                    C3=60 naming, pitch metadata in .looper.json (round trip + old patches), prefs
   SourceEncodingTests.cpp mojibake guard: no raw non-ASCII literals; UI text only via Glyphs.h
 docs/               Product, DSP, wireframes
 ```
@@ -59,7 +61,7 @@ Libraries: `LooperAutoMapper` (filename map), `LooperDsp` (Hermite/AmpEnv/Sample
 
 ### Automatic pitch detection
 
-Samples whose filename has no note name (e.g. `Pluck_alpha.wav`) are analysed on import with
+Every imported sample is analysed on import (cached per sample) with
 **YIN** (`Source/AutoMapper/PitchDetector.*`, plain C++, no JUCE):
 
 - Mix to mono, remove DC, find the onset, skip ~70 ms of attack, then run YIN on up to 9
@@ -69,10 +71,30 @@ Samples whose filename has no note name (e.g. `Pluck_alpha.wav`) are analysed on
   guard → parabolic interpolation. Range 27.5 Hz–4.2 kHz (A0–C8).
 - Median f0 across frames → nearest MIDI note (C4 = 60, A4 = 440 Hz) + cents offset.
   Confidence = periodicity × frame agreement; < 0.5 → **unpitched** (drums/noise/silence).
-- A filename note always wins. Detected roots set the zone root; `Zone::tuneCents` gets
-  −cents so detuned samples play in tune. Unpitched samples use the Settings → Mapping
-  *unpitched fallback* (equal spread + warn). Review map shows e.g.
+- A filename note always wins. For samples **without** one, detected roots set the zone root;
+  `Zone::tuneCents` gets −cents so detuned samples play in tune. Review map shows e.g.
   `Detected C#3 (−12 ct) 92%`, and warns below 80 % confidence.
+- **Filename/audio mismatch:** for samples **with** a filename note, a confident detection
+  (≥ 0.8) that lands on a different note (≥ 1 semitone) adds a Review warning such as
+  `Filename C4, audio sounds E4` or `Filename C5, audio sounds an octave lower (C4)`. The
+  filename still wins; the row's **Use detected** button re-maps that one sample to the
+  detected note (+ fine-tune) before you accept.
+- **No clear pitch** (no filename note, audio unpitched) — Settings → Mapping:
+  - *Spread chromatically* (default): drum-kit layout. Each sound gets its own single key,
+    consecutive from the *Unpitched start key* (default MIDI 36, the GM kick — shown as C2 with
+    C4 = 60, C1 with C3 = 60), in natural filename order (`Tom 2` before `Tom 10`), skipping
+    keys already used as pitched roots. Velocity layers / RR alternates of one sound
+    (`Snare_rr1`, `Snare_rr2`, `Kick_soft`, `Kick_hard`) share a key. Pitched zones' key spans
+    are clipped around the drum block. Review shows an **Unpitched** tag and the assigned key.
+  - *Fixed root C4, full range*: the previous "equal spread + warn" behaviour (root middle C,
+    span shared with pitched roots, warning per sample).
+- **Middle C convention** (Settings → Mapping): C4 = 60 (default) or C3 = 60. With C3 = 60,
+  filename notes parse one octave higher (`Piano_C3.wav` → MIDI 60) and Review / Settings
+  note labels use that naming.
+- Patches store per-sample `pitchSource` (`filename` / `detected` / `unpitched`),
+  `pitchConfidence`, `detectedCents`, `detectedPitchHz`, `detectedRootKey` and `pitchMismatch`.
+  The fields are optional and additive (schema stays 1): older patches load with them unset,
+  and older builds ignore them.
 - Cost: a few ms per sample (≈17 ms for a 3 s stereo 48 kHz file in an unoptimised build).
 
 ### Implemented vs TODO
@@ -82,7 +104,9 @@ Samples whose filename has no note name (e.g. `Pluck_alpha.wav`) are analysed on
 | Filename → note / vel / RR tokens | **Done** |
 | Velocity layer midpoints, key midpoints, RR groups | **Done** |
 | Duplicate warnings, deterministic maps | **Done** |
-| YIN pitch detect (no note in filename) | **Done** — root key + fine-tune cents + confidence; unpitched → spread fallback |
+| YIN pitch detect (no note in filename) | **Done** — root key + fine-tune cents + confidence; unpitched → chromatic drum keys (or legacy fixed root) |
+| Filename vs audio mismatch flag + Use detected | **Done** |
+| C3 = 60 naming option | **Done** (filename parse + labels) |
 | Hermite resampling + voice steal | **Done** |
 | Demo RAM sample + single full-range zone | **Done** |
 | Linear AmpEnv ADSR + APVTS params | **Done** |
@@ -157,7 +181,7 @@ JUCE is pulled via **CMake FetchContent** (not vendored). Requires CMake ≥ 3.2
 cmake -S . -B build -DLOOPER_BUILD_PLUGIN=OFF -DLOOPER_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
-# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/SourceEncodingTests
+# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/PitchMappingTests && ./build/SourceEncodingTests
 ```
 
 ### Full plugin (macOS / Windows recommended)
@@ -182,7 +206,7 @@ Open the **gear** button (top-right on the main view) in Standalone or the plugi
 | Tab | Controls |
 |-----|----------|
 | **Engine** | Polyphony (1–128) → map + voice engine; Interpolation (Hermite; sinc later); Glide ms (stored on map; engine portamento TODO); Master soft-clip On/Off (tanh on voice sum); Default filter LP/HP/BP → APVTS |
-| **Mapping** | Middle C C4=60 (locked); Key span full 0–127 vs natural; Round-robin mode Cycle / Random (per patch, same parameter as the main-view switch); Velocity curve Linear/Soft/Hard; Unpitched equal-spread + warn; Open review after import On/Off |
+| **Mapping** | Middle C C4 = 60 (default) / C3 = 60; Key span full 0–127 vs natural; Round-robin mode Cycle / Random (per patch, same parameter as the main-view switch); Velocity curve Linear/Soft/Hard; No clear pitch: Spread chromatically (default) / Fixed root C4, full range (legacy); Unpitched start key (default MIDI 36); Open review after import On/Off |
 | **MIDI** | Pitch bend ±2 (stored; engine uses range); Mod target FilterCutoff / Volume; Sustain CC64 note (TODO); Clear MIDI learn stub |
 | **Files** | Last patch path; missing-file policy (silent zones + Relocate…); Reveal last patch folder |
 | **About** | Looper / Loop Audio Lab / version / GitHub URL |
@@ -206,7 +230,7 @@ Streaming sample I/O → optional dedicated filter envelope.
 ## Contributing / next steps
 
 1. Keyboard strip zone visualization per wireframes.
-2. Optional: flag filename-vs-detected pitch mismatches in Review.
+2. Per-row manual root-key editing in Review (beyond "Use detected").
 3. Relocate: optional file-hash verification of candidates.
 4. Parameter smoothing on continuous filter/env params; finish glide DSP.
 5. Choose LICENSE compatible with your JUCE license (GPL vs commercial).

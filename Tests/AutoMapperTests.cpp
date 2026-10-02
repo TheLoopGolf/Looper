@@ -164,6 +164,15 @@ static void testKickSingle()
     CHECK_EQ(z.velHigh, 127);
 }
 
+// Legacy "equal spread + warn" fallback (Settings: Fixed root C4, full range). The default
+// chromatic drum-key fallback is covered by PitchMappingTests.
+static AutoMapOptions legacyFixedRoot()
+{
+    AutoMapOptions o;
+    o.unpitchedFallback = AutoMapOptions::UnpitchedFallback::FixedRoot;
+    return o;
+}
+
 static void testSnareRoundRobin()
 {
     std::cout << "testSnareRoundRobin\n";
@@ -173,7 +182,7 @@ static void testSnareRoundRobin()
         makeSample("s3", "snare_rr3.wav"),
         makeSample("s4", "snare_rr4.wav"),
     };
-    auto result = AutoMapper::map(samples);
+    auto result = AutoMapper::map(samples, legacyFixedRoot());
     CHECK_EQ(int(result.map.zones.size()), 4);
 
     // Same implied root (spread default 60), full key/vel, shared RR group
@@ -371,7 +380,7 @@ static void testUnpitchedFallbackAndLowConfidence()
     weak.confidence = 0.62f;
     analyses["n2"] = weak;
 
-    auto result = AutoMapper::map(samples, {}, &analyses);
+    auto result = AutoMapper::map(samples, legacyFixedRoot(), &analyses);
     const Zone* noiseZone = findZone(result.map, "n1");
     const Zone* weakZone = findZone(result.map, "n2");
     CHECK(noiseZone && weakZone);
@@ -396,14 +405,14 @@ static void testUnpitchedFallbackAndLowConfidence()
     }
 
     // Fine-tune can be disabled
-    AutoMapOptions opt;
+    AutoMapOptions opt = legacyFixedRoot();
     opt.applyDetectedFineTune = false;
     auto noTune = AutoMapper::map(samples, opt, &analyses);
     const Zone* wz = findZone(noTune.map, "n2");
     CHECK(wz && wz->tuneCents == 0.0f);
 
     // No analyses at all → legacy behaviour (spread + warn)
-    auto legacy = AutoMapper::map(samples);
+    auto legacy = AutoMapper::map(samples, legacyFixedRoot());
     for (const auto& z : legacy.map.zones)
         CHECK_EQ(z.rootKey, 60);
 }
