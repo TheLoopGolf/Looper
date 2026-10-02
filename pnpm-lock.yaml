@@ -126,6 +126,9 @@ importers:
       '@canvas-ai/render':
         specifier: workspace:*
         version: link:../render
+      fflate:
+        specifier: ^0.8.3
+        version: 0.8.3
       react:
         specifier: ^19.1.0
         version: 19.3.0

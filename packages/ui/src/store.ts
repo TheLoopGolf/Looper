@@ -9,12 +9,77 @@ import {
   type BusEvent,
   type CommandRegistry,
   type Document,
+  type JSONSchema,
 } from '@canvas-ai/core';
 import type { Renderer, ViewState } from '@canvas-ai/render';
 import { create } from 'zustand';
 import { newDocId } from './lib/image-io';
 
-export type Tool = 'move' | 'hand' | 'zoom';
+export type Tool =
+  | 'move'
+  | 'marquee'
+  | 'ellipseMarquee'
+  | 'lasso'
+  | 'polyLasso'
+  | 'wand'
+  | 'crop'
+  | 'eyedropper'
+  | 'brush'
+  | 'eraser'
+  | 'bucket'
+  | 'gradient'
+  | 'text'
+  | 'shape'
+  | 'hand'
+  | 'zoom';
+
+export type RGBAColor = [number, number, number, number];
+export type ShapeKind = 'rect' | 'ellipse' | 'polygon' | 'line' | 'pen';
+export type SelectMode = 'replace' | 'add' | 'subtract' | 'intersect';
+
+/** A command dialog generated from a schema (filters, direct adjustments, select › modify, image size…). */
+export interface ParamsDialogSpec {
+  title: string;
+  commandId: string;
+  fields: Readonly<Record<string, JSONSchema>>;
+  initial: Record<string, unknown>;
+  /** Maps form values to command params (e.g. adds layerId). */
+  build: (values: Record<string, unknown>) => Record<string, unknown>;
+  /** Live preview on the canvas while the dialog is open. */
+  preview: boolean;
+}
+
+export interface TextEditSession {
+  /** Existing text layer being edited, or null for a new one. */
+  layerId: string | null;
+  x: number;
+  y: number;
+  text: string;
+}
+
+export interface ToolOptions {
+  brush: { size: number; hardness: number; opacity: number; flow: number; spacing: number; pressureSize: boolean };
+  eraser: { size: number; hardness: number; opacity: number; flow: number; spacing: number; pressureSize: boolean };
+  select: { mode: SelectMode; feather: number; antiAlias: boolean };
+  wand: { tolerance: number; contiguous: boolean; sampleMerged: boolean };
+  bucket: { tolerance: number; contiguous: boolean; sampleMerged: boolean; opacity: number };
+  gradient: { kind: 'linear' | 'radial' | 'angle' | 'reflected' | 'diamond'; opacity: number };
+  shape: { kind: ShapeKind; fill: boolean; stroke: boolean; strokeWidth: number; radius: number; sides: number };
+  text: { fontFamily: string; fontSize: number; fontWeight: number; italic: boolean; align: 'left' | 'center' | 'right' };
+  crop: { aspect: 'free' | 'original' | '1:1' | '4:5' | '3:2' | '16:9' | '9:16'; angle: number };
+}
+
+export const DEFAULT_TOOL_OPTIONS: ToolOptions = {
+  brush: { size: 30, hardness: 0.8, opacity: 100, flow: 100, spacing: 0.15, pressureSize: true },
+  eraser: { size: 40, hardness: 0.9, opacity: 100, flow: 100, spacing: 0.15, pressureSize: true },
+  select: { mode: 'replace', feather: 0, antiAlias: true },
+  wand: { tolerance: 32, contiguous: true, sampleMerged: false },
+  bucket: { tolerance: 32, contiguous: true, sampleMerged: false, opacity: 100 },
+  gradient: { kind: 'linear', opacity: 100 },
+  shape: { kind: 'rect', fill: true, stroke: false, strokeWidth: 4, radius: 0, sides: 6 },
+  text: { fontFamily: 'sans-serif', fontSize: 64, fontWeight: 400, italic: false, align: 'left' },
+  crop: { aspect: 'free', angle: 0 },
+};
 export type Theme = 'dark' | 'light';
 
 /** One open document. The bus owns the document; the store mirrors it for React. */
@@ -46,6 +111,19 @@ export interface EditorState {
   toasts: Toast[];
   /** Renderer of the active canvas (set by CanvasView). */
   renderer: Renderer | null;
+  colors: { fg: RGBAColor; bg: RGBAColor };
+  toolOptions: ToolOptions;
+  /** Paint into the layer's pixels or its mask. */
+  editTarget: 'pixels' | 'mask';
+  quickMask: boolean;
+  /** Temporary document shown instead of the real one (live tool/dialog previews). Never in history. */
+  preview: { tabId: string; doc: Document } | null;
+  /** Bumped when a free-transform session starts/ends/changes (options bar listens). */
+  transformVersion: number;
+  /** In-place text editing session (text tool). */
+  textEdit: TextEditSession | null;
+  paramsDialog: ParamsDialogSpec | null;
+  exportOpen: boolean;
   /** View per tab, kept outside DocTab so pan/zoom doesn't re-render document panels. */
   views: Record<string, ViewState>;
   /** CSS size of the canvas viewport. */
@@ -60,6 +138,16 @@ export interface EditorState {
   setView(tabId: string, view: ViewState): void;
   setViewport(width: number, height: number): void;
   setTool(tool: Tool): void;
+  setColor(which: 'fg' | 'bg', color: RGBAColor): void;
+  swapColors(): void;
+  resetColors(): void;
+  setToolOptions<K extends keyof ToolOptions>(tool: K, patch: Partial<ToolOptions[K]>): void;
+  setEditTarget(target: 'pixels' | 'mask'): void;
+  setQuickMask(on: boolean): void;
+  setPreview(doc: Document | null): void;
+  setTextEdit(session: TextEditSession | null): void;
+  openParamsDialog(spec: ParamsDialogSpec | null): void;
+  setExportOpen(open: boolean): void;
   setTheme(theme: Theme): void;
   setRenderer(renderer: Renderer | null): void;
   setNewDocumentOpen(open: boolean): void;
@@ -103,6 +191,7 @@ export const useEditor = create<EditorState>()((set, get) => {
         if (!activeLayerId || !findLayer(doc, activeLayerId)) activeLayerId = topLayerId(doc);
         return { doc, historyVersion: t.historyVersion + 1, activeLayerId };
       });
+      if (get().preview?.tabId === tabId) set({ preview: null });
       if (event.type === 'reset') get().notify('info', 'Document reloaded');
     });
 
@@ -124,6 +213,15 @@ export const useEditor = create<EditorState>()((set, get) => {
     theme: prefersLight ? 'light' : 'dark',
     toasts: [],
     renderer: null,
+    colors: { fg: [0, 0, 0, 255], bg: [255, 255, 255, 255] },
+    toolOptions: DEFAULT_TOOL_OPTIONS,
+    editTarget: 'pixels',
+    quickMask: false,
+    preview: null,
+    transformVersion: 0,
+    textEdit: null,
+    paramsDialog: null,
+    exportOpen: false,
     views: {},
     viewport: { width: 800, height: 600 },
     newDocumentOpen: false,
@@ -170,11 +268,27 @@ export const useEditor = create<EditorState>()((set, get) => {
     setActiveTab: (id) => set({ activeTabId: id }),
     setActiveLayer(layerId) {
       const tab = activeTab(get());
-      if (tab) updateTab(tab.id, () => ({ activeLayerId: layerId }));
+      if (!tab) return;
+      updateTab(tab.id, () => ({ activeLayerId: layerId }));
+      const layer = layerId ? findLayer(tab.doc, layerId)?.layer : null;
+      if (!layer?.mask) set({ editTarget: 'pixels' });
     },
     setView: (tabId, view) => set((s) => ({ views: { ...s.views, [tabId]: view } })),
     setViewport: (width, height) => set({ viewport: { width, height } }),
     setTool: (tool) => set({ tool }),
+    setColor: (which, color) => set((s) => ({ colors: { ...s.colors, [which]: color } })),
+    swapColors: () => set((s) => ({ colors: { fg: s.colors.bg, bg: s.colors.fg } })),
+    resetColors: () => set({ colors: { fg: [0, 0, 0, 255], bg: [255, 255, 255, 255] } }),
+    setToolOptions: (tool, patch) => set((s) => ({ toolOptions: { ...s.toolOptions, [tool]: { ...s.toolOptions[tool], ...patch } } })),
+    setEditTarget: (editTarget) => set({ editTarget }),
+    setQuickMask: (quickMask) => set({ quickMask }),
+    setTextEdit: (textEdit) => set({ textEdit }),
+    openParamsDialog: (paramsDialog) => set({ paramsDialog }),
+    setExportOpen: (exportOpen) => set({ exportOpen }),
+    setPreview(doc) {
+      const tab = activeTab(get());
+      set({ preview: doc && tab ? { tabId: tab.id, doc } : null });
+    },
     setTheme: (theme) => set({ theme }),
     setRenderer: (renderer) => set({ renderer }),
     setNewDocumentOpen: (open) => set({ newDocumentOpen: open }),

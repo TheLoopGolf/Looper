@@ -25,7 +25,7 @@ const luma8 = (c: RGBA) => Math.round(0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]
  * Always starts from `source` (the pre-stroke content), so repeated previews
  * and the final command give identical results.
  */
-export function applyStroke(source: TileGrid, acc: StrokeAccumulator, keys: Iterable<number>, opts: StrokeApplyOptions): TileGrid {
+export function applyStroke(source: TileGrid, acc: StrokeAccumulator, keys: Iterable<number>, opts: StrokeApplyOptions, base: TileGrid = source): TileGrid {
   const { channels } = source;
   const opacity = acc.brush.opacity;
   const updates: [number, Tile | null][] = [];
@@ -60,7 +60,8 @@ export function applyStroke(source: TileGrid, acc: StrokeAccumulator, keys: Iter
     const empty = channels === 1 ? def === 0 && isTileEmpty(tile) : isTileEmpty(tile);
     updates.push([key, empty ? null : tile]);
   }
-  return withTiles(source, updates);
+  // `base` lets incremental previews keep tiles painted by earlier calls.
+  return withTiles(base, updates);
 }
 
 // ---------------------------------------------------------------------------

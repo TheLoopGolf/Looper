@@ -13,6 +13,15 @@ import { Tabs } from './Tabs';
 import { Toasts } from './Toasts';
 import { Toolbar } from './Toolbar';
 import { Welcome } from './Welcome';
+import { OptionsBar } from './OptionsBar';
+import { PropertiesPanel } from './PropertiesPanel';
+import { ParamsDialog } from './ParamsDialog';
+import { ExportDialog } from './ExportDialog';
+import { RecoveryDialog } from './RecoveryDialog';
+import { installTextRasterizer } from '../lib/text-raster';
+import { startAutosave } from '../lib/autosave';
+
+installTextRasterizer();
 
 export function App({ platform }: { platform?: Platform }) {
   if (platform) setPlatform(platform);
@@ -23,6 +32,8 @@ export function App({ platform }: { platform?: Platform }) {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
   }, [theme]);
+
+  useEffect(() => (typeof indexedDB === 'undefined' ? undefined : startAutosave()), []);
 
   // Warn before losing unsaved work.
   useEffect(() => {
@@ -50,15 +61,20 @@ export function App({ platform }: { platform?: Platform }) {
           }}
         >
           <Tabs />
+          {tab && <OptionsBar />}
           {tab ? <CanvasView key={tab.id} tab={tab} /> : <Welcome />}
         </main>
         <aside className="dock" aria-label="Panels">
+          <PropertiesPanel />
           <LayersPanel />
           <HistoryPanel />
         </aside>
       </div>
       <StatusBar />
       <NewDocumentDialog />
+      <ParamsDialog />
+      <ExportDialog />
+      <RecoveryDialog />
       <Toasts />
     </div>
   );

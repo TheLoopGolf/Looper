@@ -32,6 +32,7 @@ export function NewDocumentDialog() {
     <dialog ref={ref} className="dialog" aria-labelledby="new-doc-title" onClose={() => setOpen(false)} data-testid="new-document-dialog">
       <form
         method="dialog"
+        noValidate
         onSubmit={(e) => {
           e.preventDefault();
           if (!valid) return;

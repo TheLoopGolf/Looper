@@ -54,7 +54,7 @@ export async function saveCnva(bus: CommandBus, renderer: Renderer | null): Prom
   return writeCnva({ document: doc, thumbnail, history: historyMetadata(bus.history.entries, bus.history.cursor) });
 }
 
-export type ExportFormat = 'png' | 'jpeg' | 'webp';
+export type ExportFormat = 'png' | 'jpeg' | 'webp' | 'avif';
 
 /** Encodes a flattened image with the browser's encoders. JPEG has no alpha, so it is flattened onto `matte`. */
 export async function encodeImage(

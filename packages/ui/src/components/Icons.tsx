@@ -44,3 +44,25 @@ export function Logo({ size = 22 }: { size?: number }) {
     </svg>
   );
 }
+
+export const MarqueeIcon = base(<rect x="4" y="5" width="16" height="14" strokeDasharray="3 2.5" />);
+export const EllipseMarqueeIcon = base(<ellipse cx="12" cy="12" rx="8.5" ry="7" strokeDasharray="3 2.5" />);
+export const LassoIcon = base(<><path d="M7 16c-3-2-3.5-6 0-8.5S17 5 19 8s-1 7-6 7.5c-2 .2-3.6-.2-4.4.9C7.8 17.5 9 19 7.5 20.5" /></>);
+export const PolyLassoIcon = base(<path d="M5 9 11 4l8 5-3 8-8 1Z" strokeDasharray="3 2" />);
+export const WandIcon = base(<><path d="m4 20 11-11M14 4v2M18 6l-1.5 1.5M20 10h-2M10 6 8.5 4.5" /><path d="m13 7 4 4" /></>);
+export const CropIcon = base(<><path d="M6 2v14a2 2 0 0 0 2 2h14" /><path d="M2 6h14a2 2 0 0 1 2 2v14" /></>);
+export const EyedropperIcon = base(<><path d="m14 7 3 3M5 19l1-4L15 6a2.1 2.1 0 0 1 3 3l-9 9Z" /><path d="m16 4 4 4" /></>);
+export const BrushIcon = base(<><path d="M18.4 3.6a2 2 0 0 1 2.9 2.9L11 16.8 7.2 13Z" /><path d="M7 13c-2.5 0-4 1.6-4 4 0 1.5-.5 2.5-1 3 3 0 7-1 7-4.5" /></>);
+export const EraserIcon = base(<><path d="m7 21-4-4a2 2 0 0 1 0-2.8L13.2 4a2 2 0 0 1 2.8 0l4.6 4.6a2 2 0 0 1 0 2.8L11 21Z" /><path d="M7 21h14M8.5 9.5l6 6" /></>);
+export const BucketIcon = base(<><path d="m19 11-8-8-8.6 8.6a2 2 0 0 0 0 2.8l5.2 5.2a2 2 0 0 0 2.8 0Z" /><path d="M5 2l5 5M2 13h15M22 20a2 2 0 1 1-4 0c0-1.6 1.7-2.4 2-4 .3 1.6 2 2.4 2 4Z" /></>);
+export const GradientIcon = base(<><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M7 3v18M11 3v18" strokeOpacity=".6" /><path d="M15 3v18" strokeOpacity=".3" /></>);
+export const TextIcon = base(<path d="M5 6V4h14v2M12 4v16M9 20h6" />);
+export const ShapeIcon = base(<><rect x="3" y="3" width="10" height="10" rx="1" /><circle cx="15" cy="15" r="6" /></>);
+export const AdjustIcon = base(<><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 0 0 0 18Z" fill="currentColor" /></>);
+export const MaskIcon = base(<><rect x="3" y="5" width="18" height="14" rx="2" /><circle cx="12" cy="12" r="4" fill="currentColor" /></>);
+export const SwapIcon = base(<path d="M7 4 4 7l3 3M4 7h11a4 4 0 0 1 4 4v1M17 20l3-3-3-3M20 17H9a4 4 0 0 1-4-4v-1" />);
+export const QuickMaskIcon = base(<><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="12" cy="12" r="4.5" strokeDasharray="2.5 2" /></>);
+export const CheckIcon = base(<path d="m5 12 5 5L20 7" />);
+export const AlignLeftIcon = base(<path d="M4 6h16M4 10h10M4 14h16M4 18h10" />);
+export const AlignCenterIcon = base(<path d="M4 6h16M7 10h10M4 14h16M7 18h10" />);
+export const AlignRightIcon = base(<path d="M4 6h16M10 10h10M4 14h16M10 18h10" />);

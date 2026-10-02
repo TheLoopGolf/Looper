@@ -1,7 +1,7 @@
 import { BLEND_MODES, type Document, type LayerNode } from '@canvas-ai/core';
 import { useState } from 'react';
 import { activeTab, useEditor } from '../store';
-import { ChevronIcon, CopyIcon, EyeIcon, EyeOffIcon, FolderIcon, LayerIcon, LockIcon, PlusIcon, TrashIcon } from './Icons';
+import { AdjustIcon, ChevronIcon, CopyIcon, EyeIcon, EyeOffIcon, FolderIcon, LayerIcon, LockIcon, MaskIcon, PlusIcon, ShapeIcon, TextIcon, TrashIcon } from './Icons';
 
 interface Row {
   layer: LayerNode;
@@ -102,6 +102,8 @@ export function LayersPanel() {
   const tab = useEditor(activeTab);
   const run = useEditor((s) => s.run);
   const setActiveLayer = useEditor((s) => s.setActiveLayer);
+  const editTarget = useEditor((s) => s.editTarget);
+  const setEditTarget = useEditor((s) => s.setEditTarget);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [renaming, setRenaming] = useState<string | null>(null);
   const [drag, setDrag] = useState<{ id: string; over?: string; pos?: DropPos } | null>(null);
@@ -219,8 +221,8 @@ export function LayersPanel() {
                   <ChevronIcon />
                 </button>
               ) : (
-                <span className="layer-kind" aria-hidden="true">
-                  <LayerIcon />
+                <span className="layer-kind" aria-hidden="true" title={layer.type}>
+                  {layer.type === 'text' ? <TextIcon /> : layer.type === 'shape' ? <ShapeIcon /> : layer.type === 'adjustment' ? <AdjustIcon /> : <LayerIcon />}
                 </span>
               )}
               {isGroup && <FolderIcon className="folder" />}
@@ -243,6 +245,22 @@ export function LayersPanel() {
                 />
               ) : (
                 <span className="layer-name">{layer.name}</span>
+              )}
+              {layer.mask && (
+                <button
+                  className={`icon-btn mask-chip${selected && editTarget === 'mask' ? ' on' : ''}${layer.mask.enabled ? '' : ' disabled'}`}
+                  aria-label={`Edit mask of ${layer.name}`}
+                  aria-pressed={selected && editTarget === 'mask'}
+                  title="Layer mask (click to paint on it)"
+                  data-testid="mask-chip"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setActiveLayer(layer.id);
+                    setEditTarget(selected && editTarget === 'mask' ? 'pixels' : 'mask');
+                  }}
+                >
+                  <MaskIcon />
+                </button>
               )}
               <span className="layer-meta">
                 {layer.blendMode !== 'normal' && layer.blendMode !== 'passThrough' && <span className="badge">{BLEND_MODES.find((m) => m.id === layer.blendMode)?.label}</span>}

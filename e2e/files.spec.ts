@@ -66,13 +66,20 @@ test('open a PNG by dropping it and export PNG/JPEG', async ({ page }) => {
   expect(green[1]).toBe(255);
   expect(Math.abs(green[3] - 128)).toBeLessThanOrEqual(1);
 
-  const pngDownload = page.waitForEvent('download');
+  // Export dialog: PNG at full size, then JPEG at 50%.
   await page.keyboard.press(`${mod}+Shift+e`);
+  await expect(page.getByTestId('export-dialog')).toBeVisible();
+  const pngDownload = page.waitForEvent('download');
+  await page.getByTestId('export-submit').click();
   expect((await pngDownload).suggestedFilename()).toBe('dropped.png');
 
-  const jpegDownload = page.waitForEvent('download');
   await page.getByRole('button', { name: 'File' }).click();
-  await page.getByRole('menuitem', { name: /Export JPEG/ }).click();
+  await page.getByTestId('menu-export').click();
+  await page.getByTestId('export-format').selectOption('jpeg');
+  await page.getByTestId('export-scale').fill('50');
+  await expect(page.getByTestId('export-size')).toHaveText('32 × 16 px');
+  const jpegDownload = page.waitForEvent('download');
+  await page.getByTestId('export-submit').click();
   const jpeg = await jpegDownload;
   expect(jpeg.suggestedFilename()).toBe('dropped.jpg');
   const bytes = readFileSync(await jpeg.path());
