@@ -1,6 +1,9 @@
-import { tileCols, tileKey, tileRows, TILE_SIZE, type Document, type Rect } from '@canvas-ai/core';
-import { blendBuffers, mixBuffers } from './blend';
-import { documentTilePlan, type Plan } from './plan';
+import type { Document } from '../document';
+import { tileCols, tileKey, tileRows, TILE_SIZE, type Rect } from '../tiles';
+import { adjustBuffers, blendBuffers, mixBuffers } from './blend';
+import { documentTilePlan, type MaskRef, type Plan } from './plan';
+
+const maskBuf = (m: MaskRef | null) => (m ? { data: m.tile.data, density: m.density } : null);
 
 const TILE_BYTES = TILE_SIZE * TILE_SIZE * 4;
 
@@ -8,16 +11,19 @@ export function executePlanCPU(plan: Plan, target: Uint8ClampedArray): Uint8Clam
   for (const item of plan) {
     switch (item.kind) {
       case 'layer':
-        blendBuffers(target, item.tile.data, item.mode, item.opacity);
+        blendBuffers(target, item.tile.data, item.mode, item.opacity, maskBuf(item.mask));
         break;
       case 'isolated': {
         const inner = executePlanCPU(item.children, new Uint8ClampedArray(TILE_BYTES));
-        blendBuffers(target, inner, item.mode, item.opacity);
+        blendBuffers(target, inner, item.mode, item.opacity, maskBuf(item.mask));
         break;
       }
       case 'passThrough':
-        if (item.opacity >= 1) executePlanCPU(item.children, target);
-        else mixBuffers(target, executePlanCPU(item.children, new Uint8ClampedArray(target)), item.opacity);
+        if (item.opacity >= 1 && !item.mask) executePlanCPU(item.children, target);
+        else mixBuffers(target, executePlanCPU(item.children, new Uint8ClampedArray(target)), item.opacity, maskBuf(item.mask));
+        break;
+      case 'adjust':
+        adjustBuffers(target, item.adjustment, item.mode, item.opacity, maskBuf(item.mask));
         break;
     }
   }
@@ -97,4 +103,10 @@ export function downscaleRGBA(
 /** Thumbnail of the flattened document (CPU path, used where no GPU renderer exists). */
 export function renderThumbnailCPU(doc: Document, maxSize = 256): { width: number; height: number; pixels: Uint8ClampedArray } {
   return downscaleRGBA(renderDocumentCPU(doc), doc.width, doc.height, maxSize);
+}
+
+export function allTileKeysOf(doc: { width: number; height: number }): number[] {
+  const keys: number[] = [];
+  for (let ty = 0; ty < tileRows(doc.height); ty++) for (let tx = 0; tx < tileCols(doc.width); tx++) keys.push(tileKey(tx, ty));
+  return keys;
 }

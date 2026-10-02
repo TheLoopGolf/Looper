@@ -1,5 +1,5 @@
 import { TILE_SIZE, tileCoords, type Document, type Tile } from '@canvas-ai/core';
-import type { Plan } from '../plan';
+import { raster, type MaskRef, type Plan } from '@canvas-ai/core';
 import { CHECKER_SIZE, deviceRect, TiledRenderer, type RenderBackend } from '../renderer';
 import type { ViewState } from '../view';
 import { MIP_WGSL, PRESENT_WGSL, TILE_OPS_WGSL } from './shaders';
@@ -47,7 +47,11 @@ export class WebGPURenderer extends TiledRenderer {
   layerCacheMaxAge = 600;
   private context: GPUCanvasContext;
   private format: GPUTextureFormat;
-  private pipelines!: Record<'blend' | 'mix' | 'copy' | 'premultiply' | 'mip' | 'tile' | 'checker', GPURenderPipeline>;
+  private pipelines!: Record<'blend' | 'mix' | 'adjust' | 'copy' | 'premultiply' | 'mip' | 'tile' | 'checker', GPURenderPipeline>;
+  private lutTextures = new Map<raster.CompiledAdjustment, { tex: GPUTexture; view: GPUTextureView; lastUse: number }>();
+  /** Bound when an op has no mask / LUT (explicit layouts need every binding). */
+  private dummyMask!: GPUTextureView;
+  private dummyLut!: GPUTextureView;
   private samplers!: { nearest: GPUSampler; linear: GPUSampler };
   private arenas: GPUBuffer[] = [];
   private frame: Frame | null = null;
@@ -95,6 +99,8 @@ export class WebGPURenderer extends TiledRenderer {
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+        { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+        { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       ],
     });
     const tilePipelineLayout = d.createPipelineLayout({ bindGroupLayouts: [tileLayout] });
@@ -122,6 +128,7 @@ export class WebGPURenderer extends TiledRenderer {
     this.pipelines = {
       blend: tileOp('blend'),
       mix: tileOp('mixOp'),
+      adjust: tileOp('adjust'),
       copy: tileOp('copyOp'),
       premultiply: tileOp('premultiply'),
       mip: d.createRenderPipeline({
@@ -140,6 +147,10 @@ export class WebGPURenderer extends TiledRenderer {
         fragment: { module: presentModule, entryPoint: 'checker', targets: [{ format: this.format }] },
       }),
     };
+    const dummyMask = d.createTexture({ size: [TILE_SIZE, TILE_SIZE], format: 'r8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    d.queue.writeTexture({ texture: dummyMask }, new Uint8Array(TILE_SIZE * TILE_SIZE).fill(255), { bytesPerRow: TILE_SIZE }, [TILE_SIZE, TILE_SIZE]);
+    this.dummyMask = dummyMask.createView();
+    this.dummyLut = this.createLut(raster.IDENTITY_LUT).createView();
     this.samplers = {
       nearest: d.createSampler({ magFilter: 'nearest', minFilter: 'nearest' }),
       linear: d.createSampler({ magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear', maxAnisotropy: 1 }),
@@ -187,15 +198,33 @@ export class WebGPURenderer extends TiledRenderer {
     this.scratch.push(t);
   }
 
+  private createLut(lut: Uint8Array): GPUTexture {
+    const tex = this.device.createTexture({ size: [256, 1], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
+    this.device.queue.writeTexture({ texture: tex }, lut as Uint8Array<ArrayBuffer>, { bytesPerRow: 1024 }, [256, 1]);
+    return tex;
+  }
+
+  private lutTexture(adj: raster.CompiledAdjustment): GPUTextureView {
+    let entry = this.lutTextures.get(adj);
+    if (!entry) {
+      const tex = this.createLut(adj.lut);
+      entry = { tex, view: tex.createView(), lastUse: this.frameNo };
+      this.lutTextures.set(adj, entry);
+    }
+    entry.lastUse = this.frameNo;
+    return entry.view;
+  }
+
   private layerTexture(tile: Tile): GPUTextureView {
     let entry = this.layerTextures.get(tile);
     if (!entry) {
+      const mask = tile.channels === 1;
       const tex = this.device.createTexture({
         size: [TILE_SIZE, TILE_SIZE],
-        format: 'rgba8unorm',
+        format: mask ? 'r8unorm' : 'rgba8unorm',
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
       });
-      this.device.queue.writeTexture({ texture: tex }, tile.data as Uint8ClampedArray<ArrayBuffer>, { bytesPerRow: TILE_SIZE * 4 }, [TILE_SIZE, TILE_SIZE]);
+      this.device.queue.writeTexture({ texture: tex }, tile.data as Uint8ClampedArray<ArrayBuffer>, { bytesPerRow: TILE_SIZE * tile.channels }, [TILE_SIZE, TILE_SIZE]);
       entry = { tex, view: tex.createView(), lastUse: this.frameNo };
       this.layerTextures.set(tile, entry);
     }
@@ -214,23 +243,28 @@ export class WebGPURenderer extends TiledRenderer {
     target: Target,
     backdrop: GPUTextureView,
     src: GPUTextureView,
-    mode = 0,
-    opacity = 1,
-    validMax: [number, number] = [TILE_SIZE - 1, TILE_SIZE - 1],
+    o: { mode?: number; opacity?: number; validMax?: [number, number]; mask?: MaskRef | null; adjustment?: raster.CompiledAdjustment } = {},
   ): void {
     const frame = this.currentFrame();
+    const validMax = o.validMax ?? [TILE_SIZE - 1, TILE_SIZE - 1];
     const uniform = frame.uniform((v) => {
-      v.setUint32(0, mode, true);
-      v.setFloat32(4, opacity, true);
+      v.setUint32(0, o.mode ?? 0, true);
+      v.setFloat32(4, o.opacity ?? 1, true);
       v.setUint32(8, validMax[0], true);
       v.setUint32(12, validMax[1], true);
-    }, 16);
+      v.setUint32(16, o.mask ? 1 : 0, true);
+      v.setFloat32(20, o.mask?.density ?? 1, true);
+      v.setUint32(24, o.adjustment?.kernel ?? 0, true);
+      if (o.adjustment) o.adjustment.params.forEach((x, i) => v.setFloat32(32 + i * 4, x, true));
+    }, 96);
     const bind = this.device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: backdrop },
         { binding: 1, resource: src },
         { binding: 2, resource: uniform },
+        { binding: 3, resource: o.mask ? this.layerTexture(o.mask.tile) : this.dummyMask },
+        { binding: 4, resource: o.adjustment ? this.lutTexture(o.adjustment) : this.dummyLut },
       ],
     });
     const pass = this.pass(target.view, false);
@@ -248,8 +282,15 @@ export class WebGPURenderer extends TiledRenderer {
 
   private execute(plan: Plan, cur: Target): Target {
     for (const item of plan) {
-      if (item.kind === 'passThrough' && item.opacity >= 1) {
+      if (item.kind === 'passThrough' && item.opacity >= 1 && !item.mask) {
         cur = this.execute(item.children, cur);
+        continue;
+      }
+      const out = this.acquire();
+      if (item.kind === 'adjust') {
+        this.tileOp(this.pipelines.adjust, out, cur.view, cur.view, { mode: item.modeIndex, opacity: item.opacity, mask: item.mask, adjustment: item.adjustment });
+        this.release(cur);
+        cur = out;
         continue;
       }
       let src: GPUTextureView;
@@ -267,9 +308,8 @@ export class WebGPURenderer extends TiledRenderer {
         inner = this.execute(item.children, inner);
         src = inner.view;
       }
-      const out = this.acquire();
-      if (item.kind === 'passThrough') this.tileOp(this.pipelines.mix, out, cur.view, src, 0, item.opacity);
-      else this.tileOp(this.pipelines.blend, out, cur.view, src, item.modeIndex, item.opacity);
+      if (item.kind === 'passThrough') this.tileOp(this.pipelines.mix, out, cur.view, src, { opacity: item.opacity, mask: item.mask });
+      else this.tileOp(this.pipelines.blend, out, cur.view, src, { mode: item.modeIndex, opacity: item.opacity, mask: item.mask });
       this.release(cur);
       if (inner) this.release(inner);
       cur = out;
@@ -301,7 +341,7 @@ export class WebGPURenderer extends TiledRenderer {
     const [tx, ty] = tileCoords(key);
     const doc = this.doc!;
     const validMax: [number, number] = [Math.min(TILE_SIZE, doc.width - tx * TILE_SIZE) - 1, Math.min(TILE_SIZE, doc.height - ty * TILE_SIZE) - 1];
-    this.tileOp(this.pipelines.premultiply, { tex: disp.tex, view: disp.levels[0] }, result.view, result.view, 0, 1, validMax);
+    this.tileOp(this.pipelines.premultiply, { tex: disp.tex, view: disp.levels[0] }, result.view, result.view, { validMax });
     this.release(result);
     for (let i = 1; i < MIP_LEVELS; i++) {
       const bind = this.device.createBindGroup({
@@ -409,12 +449,20 @@ export class WebGPURenderer extends TiledRenderer {
         excess--;
       }
     }
+    for (const [adj, e] of this.lutTextures) {
+      if (e.lastUse < this.frameNo - this.layerCacheMaxAge) {
+        e.tex.destroy();
+        this.lutTextures.delete(adj);
+      }
+    }
     this.stats.cachedLayerTiles = this.layerTextures.size;
   }
 
   dispose(): void {
     this.disposed = true;
     for (const e of this.layerTextures.values()) e.tex.destroy();
+    for (const e of this.lutTextures.values()) e.tex.destroy();
+    this.lutTextures.clear();
     for (const d of this.display.values()) d.tex.destroy();
     for (const t of this.scratch) t.tex.destroy();
     this.layerTextures.clear();

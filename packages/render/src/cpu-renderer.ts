@@ -1,6 +1,5 @@
 import { TILE_SIZE, tileCoords, type Document } from '@canvas-ai/core';
-import { executePlanCPU } from './cpu-compositor';
-import type { Plan } from './plan';
+import { executePlanCPU, type Plan } from '@canvas-ai/core';
 import { CHECKER_SIZE, deviceRect, TiledRenderer, type RenderBackend } from './renderer';
 import type { ViewState } from './view';
 

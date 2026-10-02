@@ -1,15 +1,18 @@
 import { BLEND_MODE_IDS, type BlendMode, type GroupBlendMode } from '../blend-modes';
-import { defineCommand } from '../command';
+import { defineCommand, type Command } from '../command';
 import {
   CommandError,
   createGroupLayer,
   createPixelLayer,
   findLayer,
+  getChildren,
   walkLayers,
   type LayerNode,
 } from '../document';
 import { PatchBuilder } from '../patch';
-import { blitImage, emptyGrid, fillRect } from '../tiles';
+import { blitImage, emptyGrid, fillRect, type Tile } from '../tiles';
+import { allTileKeysOf, executePlanCPU } from '../composite/cpu';
+import { buildTilePlan } from '../composite/plan';
 import { colorParam, layerIdParam, placementParams, requireLayer, requireUnlocked, resolveInsertion } from './common';
 
 type Placement = { above?: string; below?: string; parentId?: string | null; index?: number };
@@ -347,7 +350,7 @@ export const placeImage = defineCommand<Placement & { resourceId: string; name?:
   },
 });
 
-export const LAYER_COMMANDS = [
+export const LAYER_COMMANDS: Command<any>[] = [
   createLayer,
   deleteLayer,
   duplicateLayer,
@@ -363,3 +366,67 @@ export const LAYER_COMMANDS = [
   fillRectCommand,
   placeImage,
 ];
+
+// ---------------------------------------------------------------------------
+// Merging
+// ---------------------------------------------------------------------------
+
+
+/** Flattens a layer stack into new tiles (straight RGBA). */
+function flattenLayers(layers: readonly LayerNode[], doc: { width: number; height: number }): Map<number, Tile> {
+  const tiles = new Map<number, Tile>();
+  for (const key of allTileKeysOf(doc)) {
+    const plan = buildTilePlan(layers, key, doc);
+    if (!plan.length) continue;
+    const data = executePlanCPU(plan, new Uint8ClampedArray(256 * 256 * 4));
+    const tile = { data, channels: 4 as const };
+    if (!isEmptyRGBA(data)) tiles.set(key, tile);
+  }
+  return tiles;
+}
+
+const isEmptyRGBA = (d: Uint8ClampedArray) => {
+  for (let i = 3; i < d.length; i += 4) if (d[i]) return false;
+  return true;
+};
+
+export const mergeDown = defineCommand<{ layerId: string }>({
+  id: 'layer.mergeDown',
+  title: 'Merge Down',
+  category: 'Layer',
+  agentDescription:
+    'Merge a layer into the pixel layer directly below it (applying its blend mode, opacity and mask). The result keeps the lower layer\'s name, opacity and blend mode.',
+  destructive: true,
+  schema: { type: 'object', additionalProperties: false, required: ['layerId'], properties: { layerId: layerIdParam } },
+  execute(doc, p) {
+    const loc = requireLayer(doc, p.layerId);
+    const below = getChildren(doc, loc.parentId)[loc.index - 1];
+    if (!below) throw new CommandError('There is no layer below to merge into');
+    if (below.type !== 'pixel') throw new CommandError(`Cannot merge into "${below.name}": it is not a pixel layer`);
+    requireUnlocked({ ...loc, layer: below }, 'merge');
+    // The lower layer contributes its own pixels (and mask) at full strength; its opacity/mode stay on the result.
+    const base = { ...below, opacity: 1, fill: 1, blendMode: 'normal' as const, visible: true };
+    const tiles = flattenLayers([base, loc.layer], doc);
+    const merged = { ...below, mask: null, tiles: { width: doc.width, height: doc.height, channels: 4 as const, tiles } };
+    return new PatchBuilder(doc).removeLayer(p.layerId).replaceLayer(merged).build({ layerId: below.id });
+  },
+});
+
+export const flattenImage = defineCommand<Record<string, never>>({
+  id: 'layer.flatten',
+  title: 'Flatten Image',
+  category: 'Layer',
+  agentDescription: 'Merge all visible layers into a single "Background" layer. Hidden layers are discarded.',
+  destructive: true,
+  schema: { type: 'object', additionalProperties: false, properties: {} },
+  execute(doc, _p, ctx) {
+    const tiles = flattenLayers(doc.layers, doc);
+    const b = new PatchBuilder(doc);
+    for (const l of [...doc.layers]) b.removeLayer(l.id);
+    const id = ctx.newId('layer');
+    b.insertLayer(null, 0, createPixelLayer(doc, id, 'Background', { width: doc.width, height: doc.height, channels: 4, tiles }));
+    return b.build({ layerId: id });
+  },
+});
+
+LAYER_COMMANDS.push(mergeDown, flattenImage);

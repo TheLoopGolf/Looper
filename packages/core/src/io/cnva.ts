@@ -1,5 +1,5 @@
 import { strFromU8, strToU8, unzipSync, zipSync, type Zippable } from 'fflate';
-import type { Document } from '../document';
+import { normalizeDocument, type Document } from '../document';
 import type { Actor, HistoryEntry } from '../history';
 import { createTile, tileCoords, tileKey, TILE_SIZE, type Tile, type TileGrid } from '../tiles';
 import { decodePng, encodePng } from './png';
@@ -134,7 +134,7 @@ export function readCnva(bytes: Uint8Array): CnvaContents {
     throw new Error(`This project was saved by a newer version of Canvas AI (format ${parsed.version}).`);
   }
 
-  const result: CnvaContents = { document: parsed.document as Document };
+  const result: CnvaContents = { document: normalizeDocument(parsed.document as Document) };
   const thumb = entries['thumbnail.png'];
   if (thumb) {
     const img = decodePng(thumb);

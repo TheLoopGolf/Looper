@@ -9,7 +9,8 @@
  *   Co  = (αs·Cs' + αb·Cb·(1 − αs)) / αo
  * Each blend step is quantized to 8 bits, matching RGBA8 render targets.
  */
-import { BLEND_MODE_IDS, type BlendMode } from '@canvas-ai/core';
+import { BLEND_MODE_IDS, type BlendMode } from '../blend-modes';
+import { adjustPixel, type CompiledAdjustment } from '../raster/adjustments';
 
 type Separable = (cb: number, cs: number) => number;
 
@@ -98,18 +99,26 @@ export function blendRGB(mode: BlendMode, cb: RGB, cs: RGB): RGB {
 
 const q = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 255);
 
+/** Optional per-pixel mask: factor = 1 − density·(1 − mask/255). */
+export interface MaskBuffer {
+  readonly data: Uint8ClampedArray;
+  readonly density: number;
+}
+
+const maskAt = (m: MaskBuffer | null | undefined, px: number) => (m ? 1 - m.density * (1 - m.data[px] / 255) : 1);
+
 /**
  * Blends `src` over `dst` in place (both straight RGBA8, same length).
  * `opacity` (0..1) multiplies source alpha.
  */
-export function blendBuffers(dst: Uint8ClampedArray, src: Uint8ClampedArray, mode: BlendMode, opacity: number): void {
+export function blendBuffers(dst: Uint8ClampedArray, src: Uint8ClampedArray, mode: BlendMode, opacity: number, mask?: MaskBuffer | null): void {
   const sep = SEPARABLE[mode];
   const ns = NON_SEPARABLE[mode];
   if (!sep && !ns) throw new Error(`Blend mode not implemented: ${mode}`);
   const cb: RGB = [0, 0, 0];
   const cs: RGB = [0, 0, 0];
   for (let i = 0; i < dst.length; i += 4) {
-    const as = (src[i + 3] / 255) * opacity;
+    const as = (src[i + 3] / 255) * opacity * maskAt(mask, i >> 2);
     if (as <= 0) continue;
     const ab = dst[i + 3] / 255;
     for (let c = 0; c < 3; c++) {
@@ -127,8 +136,9 @@ export function blendBuffers(dst: Uint8ClampedArray, src: Uint8ClampedArray, mod
 }
 
 /** Pass-through group opacity: dst = lerp(dst, inner, opacity) in premultiplied space. */
-export function mixBuffers(dst: Uint8ClampedArray, inner: Uint8ClampedArray, opacity: number): void {
+export function mixBuffers(dst: Uint8ClampedArray, inner: Uint8ClampedArray, opacityIn: number, mask?: MaskBuffer | null): void {
   for (let i = 0; i < dst.length; i += 4) {
+    const opacity = opacityIn * maskAt(mask, i >> 2);
     const a0 = dst[i + 3] / 255;
     const a1 = inner[i + 3] / 255;
     const ao = a0 * (1 - opacity) + a1 * opacity;
@@ -137,6 +147,24 @@ export function mixBuffers(dst: Uint8ClampedArray, inner: Uint8ClampedArray, opa
       dst[i + c] = ao > 0 ? q(pc / ao) : 0;
     }
     dst[i + 3] = q(ao);
+  }
+}
+
+/**
+ * Adjustment layer: dst.rgb = mix(dst, B(dst, adjusted(dst)), opacity·mask);
+ * alpha is unchanged (adjustments never add or remove coverage).
+ */
+export function adjustBuffers(dst: Uint8ClampedArray, adj: CompiledAdjustment, mode: BlendMode, opacity: number, mask?: MaskBuffer | null): void {
+  const sep = SEPARABLE[mode];
+  const ns = NON_SEPARABLE[mode];
+  for (let i = 0; i < dst.length; i += 4) {
+    if (dst[i + 3] === 0) continue;
+    const f = opacity * maskAt(mask, i >> 2);
+    if (f <= 0) continue;
+    const cb: RGB = [dst[i] / 255, dst[i + 1] / 255, dst[i + 2] / 255];
+    const cs = adjustPixel(adj, dst[i], dst[i + 1], dst[i + 2]);
+    const b = mode === 'normal' ? cs : sep ? [sep(cb[0], cs[0]), sep(cb[1], cs[1]), sep(cb[2], cs[2])] : ns!(cb, cs);
+    for (let c = 0; c < 3; c++) dst[i + c] = q(cb[c] + (b[c] - cb[c]) * f);
   }
 }
 

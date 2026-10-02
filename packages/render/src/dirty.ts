@@ -1,4 +1,4 @@
-import { tileCols, tileKey, tileRows, type Document, type LayerNode } from '@canvas-ai/core';
+import { raster, tileCols, tileKey, tileRows, type Document, type LayerNode } from '@canvas-ai/core';
 
 /** Canvas tiles whose composite may have changed between two document versions. */
 export interface DirtyTiles {
@@ -6,16 +6,21 @@ export interface DirtyTiles {
   readonly tiles: ReadonlySet<number>;
 }
 
-function addOccupied(layer: LayerNode, out: Set<number>): void {
+/** Tiles whose composite this layer can affect. Adjustment layers affect everything below them. */
+function addOccupied(layer: LayerNode, out: Set<number>, doc: Document): void {
   if (layer.type === 'group') {
-    for (const c of layer.children) addOccupied(c, out);
-  } else if (layer.type === 'pixel' || layer.type === 'smart' || layer.type === 'ai') {
-    for (const k of layer.tiles.tiles.keys()) out.add(k);
+    for (const c of layer.children) addOccupied(c, out, doc);
+  } else if (layer.type === 'adjustment') {
+    for (const k of allTileKeys(doc)) out.add(k);
+  } else {
+    const grid = raster.layerPixels(layer, doc.width, doc.height);
+    if (grid) for (const k of grid.tiles.keys()) out.add(k);
   }
 }
 
 /** Every render-relevant property except content (tiles/children), which is diffed separately. */
 function sameProps(a: LayerNode, b: LayerNode): boolean {
+  // Text and shape content is part of their props (their pixels are derived).
   if (a.type !== b.type) return false;
   for (const key of Object.keys(a) as (keyof LayerNode)[]) {
     if (key === 'name' || key === 'locked' || key === ('tiles' as keyof LayerNode) || key === ('children' as keyof LayerNode)) continue;
@@ -48,15 +53,15 @@ export function diffDocuments(prev: Document | null, next: Document): DirtyTiles
   for (const [id, pa] of a) {
     const pb = b.get(id);
     if (!pb) {
-      addOccupied(pa.layer, dirty); // removed
+      addOccupied(pa.layer, dirty, prev); // removed
       continue;
     }
     const moved = pa.parent !== pb.parent || rankB.get(id) !== rankA.get(id);
     const la = pa.layer;
     const lb = pb.layer;
     if (moved || !sameProps(la, lb)) {
-      addOccupied(la, dirty);
-      addOccupied(lb, dirty);
+      addOccupied(la, dirty, prev);
+      addOccupied(lb, dirty, next);
       continue;
     }
     if (la === lb || la.type === 'group') continue; // group children are diffed individually
@@ -67,7 +72,7 @@ export function diffDocuments(prev: Document | null, next: Document): DirtyTiles
       for (const k of tb.tiles.keys()) if (!ta.tiles.has(k)) dirty.add(k);
     }
   }
-  for (const [id, pb] of b) if (!a.has(id)) addOccupied(pb.layer, dirty); // added
+  for (const [id, pb] of b) if (!a.has(id)) addOccupied(pb.layer, dirty, next); // added
   return { all: false, tiles: dirty };
 }
 

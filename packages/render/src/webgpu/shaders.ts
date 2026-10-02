@@ -1,4 +1,5 @@
 import { MODE } from '../shader-common';
+import { ADJUST_KERNELS_WGSL } from './adjust-wgsl';
 
 /** WGSL port of blend.ts / gl/shaders.ts. Golden tests compare all three. */
 const BLEND_FUNCS = /* wgsl */ `
@@ -73,19 +74,26 @@ const TILE_VS = /* wgsl */ `
   return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
 }`;
 
-/** Tile ops: binding 0 = backdrop, 1 = source, 2 = uniforms { mode, opacity }. */
+/** Tile ops: 0 = backdrop, 1 = source, 2 = uniforms, 3 = mask (r8), 4 = adjustment LUT (256×1). */
 export const TILE_OPS_WGSL = /* wgsl */ `
-struct Params { mode: u32, opacity: f32, validMax: vec2u };
+struct Params { mode: u32, opacity: f32, validMax: vec2u, hasMask: u32, density: f32, kernel: u32, pad: u32, p: array<vec4f, 4> };
 @group(0) @binding(0) var backdrop: texture_2d<f32>;
 @group(0) @binding(1) var src: texture_2d<f32>;
 @group(0) @binding(2) var<uniform> params: Params;
+@group(0) @binding(3) var maskTex: texture_2d<f32>;
+@group(0) @binding(4) var lut: texture_2d<f32>;
 ${TILE_VS}
 ${BLEND_FUNCS}
+${ADJUST_KERNELS_WGSL}
+fn maskF(p: vec2i) -> f32 {
+  if (params.hasMask == 1u) { return 1.0 - params.density * (1.0 - textureLoad(maskTex, p, 0).r); }
+  return 1.0;
+}
 @fragment fn blend(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let p = vec2i(pos.xy);
   let bd = textureLoad(backdrop, p, 0);
   let sr = textureLoad(src, p, 0);
-  let as_ = sr.a * params.opacity;
+  let as_ = sr.a * params.opacity * maskF(p);
   if (as_ <= 0.0) { return bd; }
   let ab = bd.a;
   let bl = blendRGB(params.mode, bd.rgb, sr.rgb);
@@ -97,11 +105,24 @@ ${BLEND_FUNCS}
   let p = vec2i(pos.xy);
   let a = textureLoad(backdrop, p, 0);
   let b = textureLoad(src, p, 0);
-  let o = params.opacity;
+  let o = params.opacity * maskF(p);
   let ao = a.a * (1.0 - o) + b.a * o;
   let pc = a.rgb * a.a * (1.0 - o) + b.rgb * b.a * o;
   if (ao <= 0.0) { return vec4f(0.0); }
   return vec4f(clamp(pc / ao, vec3f(0.0), vec3f(1.0)), ao);
+}
+@fragment fn adjust(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let p = vec2i(pos.xy);
+  let bd = textureLoad(backdrop, p, 0);
+  let f = params.opacity * maskF(p);
+  if (bd.a <= 0.0 || f <= 0.0) { return bd; }
+  let i8 = vec3i(round(bd.rgb * 255.0));
+  let x = vec3f(textureLoad(lut, vec2i(i8.r, 0), 0).r, textureLoad(lut, vec2i(i8.g, 0), 0).g, textureLoad(lut, vec2i(i8.b, 0), 0).b);
+  var y = x;
+  if (params.kernel != 0u) { y = clamp(applyKernel(params.kernel, params.p, bd.rgb, x, round(x * 255.0)), vec3f(0.0), vec3f(1.0)); }
+  var b = y;
+  if (params.mode != 0u) { b = blendRGB(params.mode, bd.rgb, y); }
+  return vec4f(clamp(bd.rgb + (b - bd.rgb) * f, vec3f(0.0), vec3f(1.0)), bd.a);
 }
 @fragment fn copyOp(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   return textureLoad(src, vec2i(pos.xy), 0);

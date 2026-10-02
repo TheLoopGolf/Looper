@@ -1,4 +1,5 @@
 import { MODE } from '../shader-common';
+import { ADJUST_KERNELS_GLSL } from './adjust-glsl';
 
 /** Full-tile triangle; tile ops address texels with gl_FragCoord so no varyings are needed. */
 export const TILE_VS = /* glsl */ `#version 300 es
@@ -71,6 +72,12 @@ vec3 blendRGB(int m, vec3 b, vec3 s) {
   }
 }`;
 
+const MASK_GLSL = /* glsl */ `
+uniform sampler2D u_mask;
+uniform int u_hasMask;
+uniform float u_density;
+float maskF(ivec2 p) { return u_hasMask == 1 ? 1.0 - u_density * (1.0 - texelFetch(u_mask, p, 0).r) : 1.0; }`;
+
 export const BLEND_FS = /* glsl */ `#version 300 es
 precision highp float;
 precision highp int;
@@ -80,11 +87,12 @@ uniform int u_mode;
 uniform float u_opacity;
 out vec4 o;
 ${BLEND_FUNCS}
+${MASK_GLSL}
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   vec4 bd = texelFetch(u_backdrop, p, 0);
   vec4 sr = texelFetch(u_src, p, 0);
-  float as = sr.a * u_opacity;
+  float as = sr.a * u_opacity * maskF(p);
   if (as <= 0.0) { o = bd; return; }
   float ab = bd.a;
   vec3 bl = blendRGB(u_mode, bd.rgb, sr.rgb);
@@ -99,13 +107,45 @@ uniform sampler2D u_backdrop;
 uniform sampler2D u_src;
 uniform float u_opacity;
 out vec4 o;
+${MASK_GLSL}
 void main() {
   ivec2 p = ivec2(gl_FragCoord.xy);
   vec4 a = texelFetch(u_backdrop, p, 0);
   vec4 b = texelFetch(u_src, p, 0);
-  float ao = a.a * (1.0 - u_opacity) + b.a * u_opacity;
-  vec3 pc = a.rgb * a.a * (1.0 - u_opacity) + b.rgb * b.a * u_opacity;
+  float op = u_opacity * maskF(p);
+  float ao = a.a * (1.0 - op) + b.a * op;
+  vec3 pc = a.rgb * a.a * (1.0 - op) + b.rgb * b.a * op;
   o = ao > 0.0 ? vec4(clamp(pc / ao, 0.0, 1.0), ao) : vec4(0.0);
+}`;
+
+/** Adjustment layer: LUT, then kernel, blended back over the backdrop by opacity·mask; alpha unchanged. */
+export const ADJUST_FS = /* glsl */ `#version 300 es
+precision highp float;
+precision highp int;
+uniform sampler2D u_backdrop;
+uniform sampler2D u_lut;
+uniform int u_mode;
+uniform float u_opacity;
+uniform int u_kernel;
+uniform vec4 u_p[4];
+out vec4 o;
+${BLEND_FUNCS}
+${MASK_GLSL}
+${ADJUST_KERNELS_GLSL}
+void main() {
+  ivec2 p = ivec2(gl_FragCoord.xy);
+  vec4 bd = texelFetch(u_backdrop, p, 0);
+  float f = u_opacity * maskF(p);
+  if (bd.a <= 0.0 || f <= 0.0) { o = bd; return; }
+  ivec3 i8 = ivec3(round(bd.rgb * 255.0));
+  vec3 x = vec3(texelFetch(u_lut, ivec2(i8.r, 0), 0).r, texelFetch(u_lut, ivec2(i8.g, 0), 0).g, texelFetch(u_lut, ivec2(i8.b, 0), 0).b);
+  vec3 y = x;
+  if (u_kernel != 0) {
+    vec4 P[4] = vec4[4](u_p[0], u_p[1], u_p[2], u_p[3]);
+    y = clamp(applyKernel(u_kernel, P, bd.rgb, x, round(x * 255.0)), 0.0, 1.0);
+  }
+  vec3 b = u_mode == 0 ? y : blendRGB(u_mode, bd.rgb, y);
+  o = vec4(clamp(bd.rgb + (b - bd.rgb) * f, 0.0, 1.0), bd.a);
 }`;
 
 /**

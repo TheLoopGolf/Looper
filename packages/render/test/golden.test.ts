@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { BLEND_MODE_IDS, decodePng, encodePng } from '@canvas-ai/core';
 import { renderDocumentCPU } from '../src';
-import { blendScene, groupScene, SCENE_SIZE } from '../src/testing/scenes';
+import { ADJUSTMENT_KINDS } from '@canvas-ai/core';
+import { adjustmentScene, blendScene, groupScene, maskScene, SCENE_SIZE } from '../src/testing/scenes';
 
 const GOLDEN_DIR = join(dirname(fileURLToPath(import.meta.url)), 'golden');
 const UPDATE = process.env.UPDATE_GOLDENS === '1';
@@ -36,5 +37,17 @@ describe('CPU compositor golden images (≤ 1 LSB)', () => {
 
   it.each(['multiply', 'normal', 'passThrough'] as const)('groups (%s)', (mode) => {
     checkGolden(`groups-${mode}`, renderDocumentCPU(groupScene(mode)));
+  });
+
+  it.each(ADJUSTMENT_KINDS)('adjustment layer %s', (kind) => {
+    checkGolden(`adjust-${kind}`, renderDocumentCPU(adjustmentScene(kind)));
+  });
+
+  it('adjustment layer with a blend mode (hue/sat in Color mode)', () => {
+    checkGolden('adjust-hueSaturation-color', renderDocumentCPU(adjustmentScene('hueSaturation', 'color')));
+  });
+
+  it('layer and group masks', () => {
+    checkGolden('masks', renderDocumentCPU(maskScene()));
   });
 });

@@ -1,6 +1,5 @@
-import { TILE_SIZE, tileCoords, tilesInRect, type Document, type Rect } from '@canvas-ai/core';
+import { documentTilePlan, TILE_SIZE, tileCoords, tilesInRect, type Document, type Plan, type Rect } from '@canvas-ai/core';
 import { allTileKeys, diffDocuments } from './dirty';
-import { documentTilePlan, type Plan } from './plan';
 import { visibleTileKeys, type ViewState } from './view';
 
 export type RenderBackend = 'webgpu' | 'webgl2' | 'cpu';

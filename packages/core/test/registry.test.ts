@@ -21,7 +21,8 @@ describe('registry', () => {
     expect(matchesCommandPattern('layerx.create', 'layer.*')).toBe(false);
     expect(matchesCommandPattern('pixels.fillRect', 'pixels.fillRect')).toBe(true);
     const ids = createDefaultRegistry().list(['pixels.*']).map((c) => c.id);
-    expect(ids).toEqual(['pixels.fillRect']);
+    expect(ids).toContain('pixels.fillRect');
+    expect(ids.every((id) => id.startsWith('pixels.'))).toBe(true);
   });
 
   it('validates nested schemas', () => {

@@ -3,9 +3,9 @@
  * loads this page to run the GPU backends against the CPU reference and to
  * benchmark large documents.
  */
-import { BLEND_MODE_IDS, CommandBus, createDefaultRegistry, createDocument, type BlendMode, type Document } from '@canvas-ai/core';
+import { ADJUSTMENT_KINDS, BLEND_MODE_IDS, CommandBus, createDefaultRegistry, createDocument, type BlendMode, type Document } from '@canvas-ai/core';
 import { createRenderer, renderDocumentCPU, type RenderBackend, type Renderer } from '@canvas-ai/render';
-import { blendScene, groupScene } from '@canvas-ai/render/testing';
+import { adjustmentScene, blendScene, groupScene, maskScene } from '@canvas-ai/render/testing';
 import { createSampleDocument } from '@canvas-ai/ui';
 
 function maxDiff(a: Uint8ClampedArray, b: Uint8ClampedArray): { max: number; at: number } {
@@ -145,6 +145,9 @@ const harness = {
   blendModes: BLEND_MODE_IDS,
   compareBlendModes: (backend: RenderBackend) => compare(backend, BLEND_MODE_IDS.map((m) => blendScene(m))),
   compareGroups: (backend: RenderBackend) => compare(backend, (['multiply', 'normal', 'passThrough'] as const).map((m) => ({ ...groupScene(m), id: `groups-${m}` }))),
+  compareAdjustments: (backend: RenderBackend) =>
+    compare(backend, [...ADJUSTMENT_KINDS.map((k) => adjustmentScene(k)), adjustmentScene('hueSaturation', 'color'), adjustmentScene('curves', 'luminosity')]),
+  compareMasks: (backend: RenderBackend) => compare(backend, [maskScene()]),
   benchmark,
 };
 

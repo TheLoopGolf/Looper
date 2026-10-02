@@ -50,19 +50,63 @@ export interface AdjustmentLayer extends LayerCommon {
   readonly type: 'adjustment';
   readonly blendMode: BlendMode;
   readonly adjustment: { readonly kind: string; readonly params: Readonly<Record<string, unknown>> };
+  // Adjustment layers apply to the composite below them; `opacity`/`blendMode`/`mask` control how.
+}
+
+/** 8-bit straight-alpha color [r, g, b, a]. */
+export type RGBA = readonly [number, number, number, number];
+
+export interface TextStyle {
+  readonly fontFamily: string;
+  /** Pixels. */
+  readonly fontSize: number;
+  readonly fontWeight: number;
+  readonly italic: boolean;
+  readonly color: RGBA;
+  readonly align: 'left' | 'center' | 'right';
+  /** Multiple of font size. */
+  readonly lineHeight: number;
+  /** Tracking in pixels added between characters (kerning pairs come from the font). */
+  readonly letterSpacing: number;
 }
 
 export interface TextLayer extends LayerCommon {
   readonly type: 'text';
   readonly blendMode: BlendMode;
   readonly text: string;
-  readonly style: Readonly<Record<string, unknown>>;
+  /** Top-left of the text box in document pixels. */
+  readonly x: number;
+  readonly y: number;
+  /** Paragraph width for word wrapping; null = point text (no wrapping). */
+  readonly boxWidth: number | null;
+  readonly style: TextStyle;
 }
+
+/** Vector geometry in document pixels. */
+export type ShapeGeometry =
+  | { readonly kind: 'rect'; readonly x: number; readonly y: number; readonly width: number; readonly height: number; readonly radius: number }
+  | { readonly kind: 'ellipse'; readonly cx: number; readonly cy: number; readonly rx: number; readonly ry: number }
+  | {
+      readonly kind: 'polygon';
+      readonly cx: number;
+      readonly cy: number;
+      readonly radius: number;
+      readonly sides: number;
+      /** Degrees. */
+      readonly rotation: number;
+      /** Inner radius ratio (0..1) for stars; 1 or absent = regular polygon. */
+      readonly star?: number;
+    }
+  | { readonly kind: 'line'; readonly x1: number; readonly y1: number; readonly x2: number; readonly y2: number }
+  | { readonly kind: 'path'; readonly points: readonly number[]; readonly closed: boolean };
 
 export interface ShapeLayer extends LayerCommon {
   readonly type: 'shape';
   readonly blendMode: BlendMode;
-  readonly shape: Readonly<Record<string, unknown>>;
+  readonly shape: ShapeGeometry;
+  readonly fillColor: RGBA | null;
+  readonly strokeColor: RGBA | null;
+  readonly strokeWidth: number;
 }
 
 export interface SmartLayer extends LayerCommon {
@@ -123,7 +167,14 @@ export interface Guide {
 }
 
 export interface Selection {
-  /** Single-channel coverage mask, document-sized. */
+  /** Single-channel coverage mask, document-sized (255 = fully selected). */
+  readonly mask: TileGrid;
+}
+
+/** A saved selection ("alpha channel"). */
+export interface Channel {
+  readonly id: string;
+  readonly name: string;
   readonly mask: TileGrid;
 }
 
@@ -138,11 +189,15 @@ export interface Document {
   readonly layers: readonly LayerNode[];
   readonly guides: readonly Guide[];
   readonly selection: Selection | null;
+  readonly channels: readonly Channel[];
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
 /** Document fields that commands may change via `setDocProps`. */
-export type DocProps = Pick<Document, 'name' | 'width' | 'height' | 'colorProfile' | 'bitDepth' | 'guides' | 'selection' | 'metadata'>;
+export type DocProps = Pick<
+  Document,
+  'name' | 'width' | 'height' | 'colorProfile' | 'bitDepth' | 'guides' | 'selection' | 'channels' | 'metadata'
+>;
 
 export const MAX_DOCUMENT_SIZE = 30000;
 
@@ -172,8 +227,14 @@ export function createDocument(opts: {
     layers: opts.layers ?? [],
     guides: [],
     selection: null,
+    channels: [],
     metadata: {},
   };
+}
+
+/** Fills in fields added after a document was saved (older `.cnva` files). */
+export function normalizeDocument(doc: Document): Document {
+  return { ...doc, guides: doc.guides ?? [], selection: doc.selection ?? null, channels: doc.channels ?? [], metadata: doc.metadata ?? {} };
 }
 
 function common(id: string, name: string): LayerCommon {
@@ -198,6 +259,46 @@ export function createPixelLayer(
   tiles?: TileGrid,
 ): PixelLayer {
   return { ...common(id, name), type: 'pixel', blendMode: 'normal', tiles: tiles ?? emptyGrid(doc.width, doc.height, 4) };
+}
+
+export const DEFAULT_TEXT_STYLE: TextStyle = {
+  fontFamily: 'sans-serif',
+  fontSize: 48,
+  fontWeight: 400,
+  italic: false,
+  color: [0, 0, 0, 255],
+  align: 'left',
+  lineHeight: 1.2,
+  letterSpacing: 0,
+};
+
+export function createTextLayer(id: string, name: string, props: { text: string; x: number; y: number; boxWidth?: number | null; style?: Partial<TextStyle> }): TextLayer {
+  return {
+    ...common(id, name),
+    type: 'text',
+    blendMode: 'normal',
+    text: props.text,
+    x: props.x,
+    y: props.y,
+    boxWidth: props.boxWidth ?? null,
+    style: { ...DEFAULT_TEXT_STYLE, ...props.style },
+  };
+}
+
+export function createShapeLayer(id: string, name: string, props: { shape: ShapeGeometry; fillColor?: RGBA | null; strokeColor?: RGBA | null; strokeWidth?: number }): ShapeLayer {
+  return {
+    ...common(id, name),
+    type: 'shape',
+    blendMode: 'normal',
+    shape: props.shape,
+    fillColor: props.fillColor === undefined ? [0, 0, 0, 255] : props.fillColor,
+    strokeColor: props.strokeColor ?? null,
+    strokeWidth: props.strokeWidth ?? 0,
+  };
+}
+
+export function createAdjustmentLayer(id: string, name: string, kind: string, params: Record<string, unknown>): AdjustmentLayer {
+  return { ...common(id, name), type: 'adjustment', blendMode: 'normal', adjustment: { kind, params } };
 }
 
 export function createGroupLayer(id: string, name: string, children: LayerNode[] = []): GroupLayer {

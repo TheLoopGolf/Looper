@@ -3,14 +3,20 @@
  * the UI (property editors), plugin validation, and the AI agent's tool list,
  * so it is kept deliberately small and fully validated here.
  */
+/** `title` labels the field in generated UI (dialogs, property panels); `description` documents it for agents. */
+interface Meta {
+  title?: string;
+  description?: string;
+}
+
 export type JSONSchema =
-  | { type: 'object'; properties: Readonly<Record<string, JSONSchema>>; required?: readonly string[]; description?: string; additionalProperties?: false }
-  | { type: 'string'; description?: string; enum?: readonly string[]; minLength?: number; maxLength?: number; default?: string }
-  | { type: 'number' | 'integer'; description?: string; minimum?: number; maximum?: number; default?: number }
-  | { type: 'boolean'; description?: string; default?: boolean }
-  | { type: 'array'; items: JSONSchema; description?: string; minItems?: number; maxItems?: number }
-  | { type: 'null'; description?: string }
-  | { anyOf: readonly JSONSchema[]; description?: string };
+  | ({ type: 'object'; properties: Readonly<Record<string, JSONSchema>>; required?: readonly string[]; additionalProperties?: false } & Meta)
+  | ({ type: 'string'; enum?: readonly string[]; minLength?: number; maxLength?: number; default?: string } & Meta)
+  | ({ type: 'number' | 'integer'; minimum?: number; maximum?: number; default?: number } & Meta)
+  | ({ type: 'boolean'; default?: boolean } & Meta)
+  | ({ type: 'array'; items: JSONSchema; minItems?: number; maxItems?: number; default?: unknown } & Meta)
+  | ({ type: 'null' } & Meta)
+  | ({ anyOf: readonly JSONSchema[] } & Meta);
 
 /** Returns a list of human-readable problems; empty means valid. */
 export function validate(schema: JSONSchema, value: unknown, path = 'params'): string[] {

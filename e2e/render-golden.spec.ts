@@ -18,5 +18,16 @@ for (const backend of ['webgpu', 'webgl2'] as const) {
       const results = await page.evaluate((b) => (window as any).harness.compareGroups(b), backend);
       for (const r of results) expect(r.max, `${r.name}: ${r.detail ?? ''}`).toBeLessThanOrEqual(1);
     });
+
+    test('all adjustment layers ≤ 1 LSB vs CPU reference', async ({ page }) => {
+      const results = await page.evaluate((b) => (window as any).harness.compareAdjustments(b), backend);
+      expect(results.length).toBeGreaterThanOrEqual(14);
+      for (const r of results) expect(r.max, `${r.name}: ${r.detail ?? ''}`).toBeLessThanOrEqual(1);
+    });
+
+    test('layer and group masks ≤ 1 LSB vs CPU reference', async ({ page }) => {
+      const results = await page.evaluate((b) => (window as any).harness.compareMasks(b), backend);
+      for (const r of results) expect(r.max, `${r.name}: ${r.detail ?? ''}`).toBeLessThanOrEqual(1);
+    });
   });
 }
