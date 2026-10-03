@@ -12,6 +12,7 @@ LooperAudioProcessorEditor::LooperAudioProcessorEditor (LooperAudioProcessor& p)
     mainView_.setReviewCallback ([this] { handleOpenReview(); });
     mainView_.setSettingsCallback ([this] { handleOpenSettings(); });
     mainView_.setRelocateCallback ([this] { showRelocate(); });
+    mainView_.setMemoryCallback ([this] { showSettings(); settingsView_.showMemoryTab(); });
     relocateView_.setCloseCallback ([this] { showMain(); });
     reviewMapView_.setAcceptCallback ([this] { handleAcceptMap(); });
     reviewMapView_.setBackCallback ([this] { handleBackToPlay(); });

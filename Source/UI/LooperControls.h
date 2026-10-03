@@ -72,4 +72,39 @@ private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GearButton)
 };
 
+/**
+ * Main-view memory / streaming chip: a golf ball (brass = all in RAM, fairway in flight =
+ * streaming, sand = dropouts) followed by e.g. "RAM 42 MB . Streaming". Click opens Settings.
+ */
+class MemoryChip : public juce::Component, public juce::SettableTooltipClient
+{
+public:
+    enum class Tone { InRam, Streaming, Warning };
+
+    MemoryChip();
+    /** Repaints only when something changed. `active` = a voice is streaming right now. */
+    void setStatus (const juce::String& text, Tone tone, bool active);
+    const juce::String& text() const noexcept { return text_; }
+    /** Width that fits the current text. */
+    int idealWidth() const;
+
+    std::function<void()> onClick;
+
+    void paint (juce::Graphics& g) override;
+    void mouseUp (const juce::MouseEvent& e) override;
+    void mouseEnter (const juce::MouseEvent&) override { hover_ = true; repaint(); }
+    void mouseExit (const juce::MouseEvent&) override { hover_ = false; repaint(); }
+
+    /** Golf ball with dimples centred in `area`; `inFlight` adds speed lines behind it. */
+    static void drawGolfBall (juce::Graphics& g, juce::Rectangle<float> area, juce::Colour tint, bool inFlight);
+
+private:
+    juce::String text_;
+    Tone tone_ = Tone::InRam;
+    bool active_ = false;
+    bool hover_ = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MemoryChip)
+};
+
 } // namespace looper

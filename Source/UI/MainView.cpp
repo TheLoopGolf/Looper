@@ -4,6 +4,7 @@
 #include "Glyphs.h"
 #include "../AutoMapper/FilenameTokens.h"
 #include "../ZoneEdit/ZoneEditor.h"
+#include "../SamplePool/MemoryFormat.h"
 #include <algorithm>
 
 namespace looper {
@@ -54,6 +55,9 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor), z
     missingBanner_.setTooltip ("Some sample files were not found. Click to relocate them.");
     missingBanner_.onClick = [this] { if (onRelocate_) onRelocate_(); };
     addChildComponent (missingBanner_);
+
+    memoryChip_.onClick = [this] { if (onMemory_) onMemory_(); else if (onSettings_) onSettings_(); };
+    addChildComponent (memoryChip_);
 
     dropHint_.setJustificationType (juce::Justification::centred);
     dropHint_.setColour (juce::Label::textColourId, Palette::text());
@@ -423,6 +427,54 @@ void MainView::updateStatus()
     status_.setText (st, juce::dontSendNotification);
 }
 
+void MainView::visibilityChanged()
+{
+    if (isVisible())
+    {
+        updateMemoryChip();
+        startTimerHz (4);
+    }
+    else
+        stopTimer();
+}
+
+void MainView::updateMemoryChip()
+{
+    const bool show = processor_.hasUserInstrument();
+    if (show != memoryChip_.isVisible())
+    {
+        memoryChip_.setVisible (show);
+        resized();
+    }
+    if (! show)
+        return;
+    const auto st = processor_.memoryStatus();
+    const auto d = describeMemory (st.ramBytes, st.streamingSamples, st.underruns);
+    const auto tone = d.tone == MemoryTone::Warning   ? MemoryChip::Tone::Warning
+                    : d.tone == MemoryTone::Streaming ? MemoryChip::Tone::Streaming
+                                                      : MemoryChip::Tone::InRam;
+    const auto text = juce::String (d.ram) + glyph::dotSep() + juce::String (d.state);
+    const int before = memoryChip_.idealWidth();
+    memoryChip_.setStatus (text, tone, st.activeStreams > 0);
+    if (memoryChip_.idealWidth() != before)
+        resized();
+
+    juce::String tip;
+    tip << st.samples << " samples" << glyph::dotSep();
+    if (st.loadIntoRam)
+        tip << "Load fully into RAM is on for this patch";
+    else
+        tip << st.streamingSamples << " stream from disk (preload "
+            << juce::String (formatPreloadFrames (st.preloadFrames)) << ")";
+    tip << "\nSample audio " << juce::String (formatBytes (st.sampleBytes))
+        << " of " << juce::String (formatBytes (st.fullBytes)) << " fully loaded";
+    if (st.ringBytes > 0)
+        tip << glyph::dotSep() << "stream buffers " << juce::String (formatBytes (st.ringBytes));
+    tip << "\nStreaming voices now: " << st.activeStreams << glyph::dotSep() << "dropouts: "
+        << juce::String ((juce::int64) st.underruns) << "\nClick for memory settings";
+    memoryChip_.setTooltip (tip);
+}
+
 void MainView::refreshZoneViews()
 {
     rebuildZoneRows();
@@ -543,6 +595,7 @@ void MainView::refreshFromProcessor()
     applySelection();
     resized();
     repaint();
+    updateMemoryChip();
 }
 
 void MainView::paint (juce::Graphics& g)
@@ -658,6 +711,14 @@ void MainView::resized()
                          juce::jmax (120, header.getWidth() - 360), 28);
 
     settingsBtn_.setBounds (getWidth() - 16 - 36, 18, 36, 28);
+    if (memoryChip_.isVisible())
+    {
+        const int w = juce::jlimit (120, 260, memoryChip_.idealWidth());
+        memoryChip_.setBounds (settingsBtn_.getX() - 8 - w, 20, w, 24);
+        subtitle_.setBounds (subtitle_.getBounds().withRight (juce::jmin (subtitle_.getRight(), memoryChip_.getX() - 8)));
+    }
+    else
+        memoryChip_.setBounds ({});
 
     const int perfH = 168;
     auto perf = getLocalBounds().reduced (16).removeFromBottom (perfH).reduced (10, 8);

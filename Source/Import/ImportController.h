@@ -14,6 +14,17 @@
 
 namespace looper {
 
+/** How loadFileIntoPool keeps decoded audio (Settings: preload size / "Load fully into RAM"). */
+struct StreamingOptions
+{
+    /** Frames kept in RAM per sample; longer samples stream the remainder from disk. */
+    int64_t preloadFrames = 65536;
+    /** Decode every sample completely (small patches, offline bounce). */
+    bool loadFully = false;
+
+    bool operator==(const StreamingOptions&) const = default;
+};
+
 struct LoadedSample
 {
     SampleRef ref;
@@ -34,6 +45,16 @@ public:
     static juce::Array<juce::File> collectAudioFiles(const juce::Array<juce::File>& filesOrFolders);
 
     LoadedSample loadFileIntoPool(const juce::File& file, SamplePool& pool);
+
+    /** Applies to every later load (import, patch load, relocate). Message thread. */
+    void setStreamingOptions(StreamingOptions o) { streaming_ = o; }
+    const StreamingOptions& streamingOptions() const { return streaming_; }
+
+    /**
+     * Decode `file` as SampleBuffer: fully, or (streaming) only the first preload frames plus a
+     * FileStreamSource for the rest. Returns false + error when the file cannot be read.
+     */
+    bool decodeFile(const juce::File& file, SampleBuffer& out, juce::String& error);
 
     /** Load using an existing SampleRef id/metadata (patch reload). path taken from file. */
     LoadedSample loadFileIntoPool(const juce::File& file, SamplePool& pool, const SampleRef& preserve);
@@ -100,6 +121,7 @@ private:
     AutoMapOptions pendingOptions_, lastOptions_;
     PitchAnalysisMap pendingAnalyses_, lastAnalyses_;
     PitchAnalysisMap pitchCache_;
+    StreamingOptions streaming_;
 };
 
 } // namespace looper

@@ -93,6 +93,7 @@ std::string SessionPrefs::toJson() const
       << "\"openReviewAfterImport\":" << (openReviewAfterImport ? "true" : "false") << ','
       << "\"unpitchedFallback\":\"" << unpitchedFallbackToString(unpitchedFallback) << "\","
       << "\"unpitchedStartNote\":" << unpitchedStartNote << ','
+      << "\"preloadFrames\":" << preloadFrames << ','
       << "\"pitchBendRangeSemis\":" << pitchBendRangeSemis << ','
       << "\"modWheelTarget\":\"" << escape(PatchStore::modWheelTargetToString(modWheelTarget)) << "\""
       << '}';
@@ -128,6 +129,9 @@ std::optional<SessionPrefs> SessionPrefs::fromJson(const std::string& json)
             p.unpitchedFallback = *f;
     if (auto n = findNumberField(json, "unpitchedStartNote"))
         p.unpitchedStartNote = std::clamp(static_cast<int>(std::lround(*n)), 0, 127);
+    // Disk streaming (v1.2): missing -> 64k-frame preload.
+    if (auto n = findNumberField(json, "preloadFrames"))
+        p.preloadFrames = std::clamp(static_cast<int>(std::lround(*n)), kMinPreloadFrames, kMaxPreloadFrames);
     if (auto n = findNumberField(json, "pitchBendRangeSemis"))
         p.pitchBendRangeSemis = static_cast<float>(std::max(0.0, *n));
     if (auto s = findStringField(json, "modWheelTarget"))

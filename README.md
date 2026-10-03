@@ -31,9 +31,11 @@ Product & DSP design (authoritative): [`docs/PRODUCT.md`](docs/PRODUCT.md), [`do
 Source/
   AutoMapper/       Filename parse + zone building + YIN pitch detection (PitchDetector)
   InstrumentMap/    Zone, SampleRef, InstrumentMap types
-  SamplePool/       RAM SampleBuffer pool + demo tone generator
+  SamplePool/       SampleBuffer pool (RAM or preload + stream source, lock-free snapshots +
+                    hazard pointers, deferred GC) + demo tone; MemoryFormat (RAM / status text)
   VoiceEngine/      Polyphony, steal, Hermite + AmpEnv + SVF; vel layers + RR (Cycle / Random, FastRng);
-                    GainRamp (20 ms zone-gain glide), exact-zone audition (lock-free request)
+                    GainRamp (20 ms zone-gain glide), exact-zone audition (lock-free request);
+                    DiskStreamer (reader threads + per-voice rings, underrun fade, offline block-read)
   AmpEnv/           Linear ADSR (min attack 0.1 ms)
   Filter/           Linear Simper SVF (LP/HP/BP, dual-state stereo)
   MidiRouter/       Note/CC + pitch bend (±2 st); CC1 → cutoff when target FilterCutoff
@@ -48,7 +50,8 @@ Source/
                     ZoneStrip (strip geometry, hit-test, snap, drag maths), EditHistory (saved-state
                     tracking), all no JUCE; ZoneEditAction (juce::UndoableAction, single or group)
   Prefs/            SessionPrefs (global/session settings JSON)
-  Import/           ImportController + MapCommit (message-thread pipeline)
+  Import/           ImportController + MapCommit (message-thread pipeline); FileStreamSource
+                    (JUCE reader per sample, LRU-capped open files)
   Plugin/           PluginProcessor + PluginEditor (APVTS ADSR/Volume/Filter)
 Tests/
   AutoMapperTests.cpp
@@ -64,6 +67,9 @@ Tests/
   ZoneEditorTests.cpp field edits + clamping, no inverted ranges, overlap warnings, Reset to auto /
                     Use detected, .looper.json round trip, live voice updates (no audio-thread alloc),
                     audition note, juce::UndoManager undo/redo + drag coalescing (when built with JUCE)
+  StreamingTests.cpp bit-exact streamed vs full playback (pitch ratios, boundary, glide, WAV
+                    formats), underrun fade/recovery, slot steal/reuse, offline, no audio-thread
+                    alloc, 128 voices, live swap + GC, small samples in RAM, loadIntoRam persistence
   ZoneStripTests.cpp strip geometry / snapping / hit-test, drag maths (edges, root, body, Alt-draw,
                     clamping, no inversion), selection rules, mixed values, relative / absolute group
                     edits, all-or-nothing group records, saved-state tracking, gain ramp (no step,
@@ -126,12 +132,12 @@ Every imported sample is analysed on import (cached per sample) with
 | Linear AmpEnv ADSR + APVTS params | **Done** |
 | SVF (LP/HP/BP) + cutoff / res / env amt APVTS | **Done** |
 | Map RR / velocity layers at play | **Done** (RR Cycle or Random per patch; vel layers by range) |
-| Streaming sample I/O | TODO |
+| Streaming sample I/O | **Done** - preload + disk streaming, Load fully into RAM option; see below |
 | Patch JSON save/load + host state | **Done** |
 | WAV/AIFF/FLAC RAM load on import | **Done** |
 | Drag-drop import → AutoMapper → Review → Accept | **Done** |
 | MainView empty/loaded + ReviewMapView table | **Done** |
-| Settings (Engine / Mapping / MIDI / Files / About) | **Done** |
+| Settings (Engine / Mapping / MIDI / Files / Memory / About) | **Done** |
 | Keyboard strip graphic | **Done** — zones, root dots, selection; click to select / audition; drag edges / root / body, Alt-draw |
 | Manual zone editor (root, keys, velocity, tune, gain, RR) + undo/redo | **Done** — see below |
 | Multi-zone selection + relative / absolute group edits | **Done** — see below |
@@ -199,6 +205,17 @@ Rules live in `Source/ZoneEdit/` (no JUCE) and are covered by `ZoneEditorTests` 
 
 **Format sketch (schemaVersion 1):** `name`, `patchRoot`, `samples[]` (`id`, `path`, …), `map` (globals incl. optional `roundRobinMode` + `zones[]`, each zone with an optional `auto` snapshot for Reset to auto), optional `params` (APVTS float snapshot).
 
+### Disk streaming (long samples)
+
+Samples longer than the **preload** (default 64k frames, about 1.5 s) keep only their start in RAM;
+the rest streams from disk on background threads, so big libraries load in a fraction of the time
+and memory. Short samples stay fully in RAM. The header chip shows **RAM 24 MB · Streaming** (or
+**In RAM**, or a sand **N dropouts** warning if the disk ever fell behind); click it for
+**Settings → Memory**: *Stream long samples* / *Load fully into RAM* (saved per patch) and the
+preload size. Offline bounces read from disk synchronously, so they never drop out. Streamed
+playback is bit-identical to fully loaded playback. Details, benchmark and limitations:
+[docs/disk-streaming.md](docs/disk-streaming.md).
+
 ### Relocate missing samples
 
 When sample files have moved, Looper still loads the patch (offline zones are silent) and lists the missing files on the **Relocate** screen (sample, original path, status). Open it from the sand **“N samples missing · Relocate…”** banner on the main view.
@@ -209,7 +226,7 @@ When sample files have moved, Looper still loads the patch (offline zones are si
 
 Each found file is decoded and swapped in **live** (next note-on plays it) and the patch is marked **unsaved**; the next **Save** writes the new paths relative to the patch file. The matching logic lives in `Source/PatchStore/SampleRelocator.*` (std::filesystem, no JUCE) and is covered by `RelocatorTests`.
 
-**Limitations (v1):** no sample embedding; streaming long files still TODO. Relocate: case folding covers ASCII + Latin-1 letters only (no full Unicode case/normalization — e.g. NFD vs NFC names won't match); scans stop after 250 000 files / depth 32; a cascade/search never overrides a file you already relinked unless it was ambiguous.
+**Limitations (v1):** no sample embedding. Relocate: case folding covers ASCII + Latin-1 letters only (no full Unicode case/normalization — e.g. NFD vs NFC names won't match); scans stop after 250 000 files / depth 32; a cascade/search never overrides a file you already relinked unless it was ambiguous.
 
 
 ## Build
@@ -222,7 +239,7 @@ JUCE is pulled via **CMake FetchContent** (not vendored). Requires CMake ≥ 3.2
 cmake -S . -B build -DLOOPER_BUILD_PLUGIN=OFF -DLOOPER_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
-# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/PitchMappingTests && ./build/SourceEncodingTests && ./build/ZoneEditorTests && ./build/ZoneStripTests
+# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/PitchMappingTests && ./build/StreamingTests && ./build/SourceEncodingTests && ./build/ZoneEditorTests && ./build/ZoneStripTests
 ```
 
 ### Full plugin (macOS / Windows recommended)
@@ -250,6 +267,7 @@ Open the **gear** button (top-right on the main view) in Standalone or the plugi
 | **Mapping** | Middle C C4 = 60 (default) / C3 = 60; Key span full 0–127 vs natural; Round-robin mode Cycle / Random (per patch, same parameter as the main-view switch); Velocity curve Linear/Soft/Hard; No clear pitch: Spread chromatically (default) / Fixed root C4, full range (legacy); Unpitched start key (default MIDI 36); Open review after import On/Off |
 | **MIDI** | Pitch bend ±2 (stored; engine uses range); Mod target FilterCutoff / Volume; Sustain CC64 note (TODO); Clear MIDI learn stub |
 | **Files** | Last patch path; missing-file policy (silent zones + Relocate…); Reveal last patch folder |
+| **Memory** | Sample memory: Stream long samples (default) / Load fully into RAM (per patch); Preload size 16k–1024k frames (default 64k, session); live status + Reset dropout count |
 | **About** | Looper / Loop Audio Lab / version / GitHub URL |
 
 Session prefs persist in host state (`prefsJson` alongside patch). Mapping options feed the **next** AutoMapper import. ADSR / filter knobs stay on MainView.
@@ -266,7 +284,7 @@ Session prefs persist in host state (`prefsJson` alongside patch). Mapping optio
 
 ## Next milestone
 
-Streaming sample I/O → optional dedicated filter envelope.
+Optional dedicated filter envelope; sustain pedal; real-DAW testing of streaming on slow drives.
 
 ## Contributing / next steps
 

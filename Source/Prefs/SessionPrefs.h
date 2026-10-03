@@ -31,6 +31,16 @@ struct SessionPrefs
     AutoMapOptions::UnpitchedFallback unpitchedFallback = AutoMapOptions::UnpitchedFallback::Chromatic;
     int unpitchedStartNote = 36;        // MIDI note of the first drum key (GM kick)
 
+    // --- Sample memory / disk streaming ---
+    /**
+     * Frames of each sample kept in RAM (the preload); the rest streams from disk. Samples no
+     * longer than this stay fully in RAM. Per-patch "Load fully into RAM" overrides it.
+     */
+    int preloadFrames = kDefaultPreloadFrames;
+    static constexpr int kDefaultPreloadFrames = 65536;
+    static constexpr int kMinPreloadFrames = 8192;
+    static constexpr int kMaxPreloadFrames = 1048576;
+
     // --- MIDI ---
     float pitchBendRangeSemis = 2.0f;
     ModWheelTarget modWheelTarget = ModWheelTarget::FilterCutoff;
@@ -64,6 +74,7 @@ struct SessionPrefs
             && openReviewAfterImport == o.openReviewAfterImport
             && unpitchedFallback == o.unpitchedFallback
             && unpitchedStartNote == o.unpitchedStartNote
+            && preloadFrames == o.preloadFrames
             && near(pitchBendRangeSemis, o.pitchBendRangeSemis)
             && modWheelTarget == o.modWheelTarget;
     }

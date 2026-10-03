@@ -71,6 +71,11 @@ LooperAudioProcessor::LooperAudioProcessor()
     map_ = *mapShared_;
     voiceEngine_.adoptMap(mapShared_);
     voiceEngine_.setSamplePool(&samplePool_);
+    voiceEngine_.setStreamer(&diskStreamer_);
+    diskStreamer_.start();
+    importController_.setStreamingOptions(currentStreamingOptions());
+    poolGc_.pool = &samplePool_;
+    poolGc_.startTimer(1000);
     // Random round-robin: fresh sequence per plugin instance (tests seed explicitly).
     voiceEngine_.setRandomSeed(static_cast<uint64_t>(juce::Time::getHighResolutionTicks())
                                ^ static_cast<uint64_t>(juce::Random::getSystemRandom().nextInt64()));
@@ -78,7 +83,88 @@ LooperAudioProcessor::LooperAudioProcessor()
     ensureDemoInstrument();
 }
 
-LooperAudioProcessor::~LooperAudioProcessor() = default;
+LooperAudioProcessor::~LooperAudioProcessor()
+{
+    poolGc_.stopTimer();
+    diskStreamer_.stop();
+}
+
+looper::StreamingOptions LooperAudioProcessor::currentStreamingOptions() const
+{
+    looper::StreamingOptions o;
+    o.preloadFrames = juce::jlimit(SessionPrefs::kMinPreloadFrames, SessionPrefs::kMaxPreloadFrames, prefs_.preloadFrames);
+    o.loadFully = loadIntoRam_;
+    return o;
+}
+
+void LooperAudioProcessor::ensureStreamingReady()
+{
+    if (samplePool_.memoryStats().streamingSamples > 0)
+        diskStreamer_.ensureRings();
+}
+
+void LooperAudioProcessor::reloadSamplesForStreaming()
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    const auto opts = currentStreamingOptions();
+    if (opts == importController_.streamingOptions())
+        return;
+    importController_.setStreamingOptions(opts);
+    {
+        SamplePool::ScopedBatch batch(samplePool_);
+        for (auto& ref : userSampleRefs_)
+        {
+            if (std::find(offlineSampleIds_.begin(), offlineSampleIds_.end(), ref.id) != offlineSampleIds_.end())
+                continue;
+            if (ref.path.find("://") != std::string::npos)
+                continue;
+            const juce::File f(ref.path);
+            if (! f.existsAsFile())
+                continue;
+            // Sounding voices keep their old buffer (and stream slot) until they end.
+            auto loaded = importController_.loadFileIntoPool(f, samplePool_, ref);
+            if (loaded.ok)
+                ref = loaded.ref;
+        }
+        ensureStreamingReady(); // before the batch publishes any streamed buffer
+    }
+    samplePool_.collectGarbage();
+}
+
+void LooperAudioProcessor::setLoadIntoRam(bool fully)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    if (fully == loadIntoRam_)
+        return;
+    loadIntoRam_ = fully;
+    {
+        auto next = copyInstrumentMap();
+        next.loadIntoRam = fully;
+        swapPlayableMap(std::move(next));
+    }
+    reloadSamplesForStreaming();
+    if (hasUserInstrument_.load())
+        editState_.markExternalChange(); // saved with the patch: unsaved until the next save
+}
+
+LooperAudioProcessor::MemoryStatus LooperAudioProcessor::memoryStatus() const
+{
+    MemoryStatus st;
+    const auto pool = samplePool_.memoryStats();
+    st.sampleBytes = pool.residentBytes;
+    st.fullBytes = pool.fullBytes;
+    st.samples = pool.samples;
+    st.streamingSamples = pool.streamingSamples;
+    // Stream rings are only counted while something actually streams, so the
+    // "In RAM" figure matches the decoded sample data the user asked for.
+    st.ringBytes = st.streamingSamples > 0 ? diskStreamer_.ringBytes() : 0;
+    st.ramBytes = st.sampleBytes + st.ringBytes;
+    st.activeStreams = voiceEngine_.streamingStats().streamingVoices;
+    st.underruns = voiceEngine_.underrunCount();
+    st.loadIntoRam = loadIntoRam_;
+    st.preloadFrames = (int) currentStreamingOptions().preloadFrames;
+    return st;
+}
 
 void LooperAudioProcessor::ensureDemoInstrument()
 {
@@ -141,9 +227,12 @@ int LooperAudioProcessor::rrDepth() const
 bool LooperAudioProcessor::importAudioFiles(const juce::Array<juce::File>& filesOrFolders)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
-    return importController_.importFiles(filesOrFolders, samplePool_, userSampleRefs_,
-                                         prefs_.toAutoMapOptions())
-           && importController_.hasPending();
+    importController_.setStreamingOptions(currentStreamingOptions());
+    const bool ok = importController_.importFiles(filesOrFolders, samplePool_, userSampleRefs_,
+                                                  prefs_.toAutoMapOptions())
+                    && importController_.hasPending();
+    ensureStreamingReady();
+    return ok;
 }
 
 bool LooperAudioProcessor::acceptPendingMap()
@@ -196,6 +285,7 @@ void LooperAudioProcessor::pushPrefsOntoMap(InstrumentMap& map) const
     map.glideMs = prefs_.glideMs;
     map.velCurve = prefs_.velCurve;
     map.modWheelTarget = prefs_.modWheelTarget;
+    map.loadIntoRam = loadIntoRam_;
 }
 
 void LooperAudioProcessor::applyPrefsToRuntime()
@@ -224,8 +314,11 @@ void LooperAudioProcessor::applySessionPrefs(const SessionPrefs& prefs)
     prefs_ = prefs;
     prefs_.polyphony = juce::jlimit(1, 128, prefs_.polyphony);
     prefs_.glideMs = juce::jmax(0.0f, prefs_.glideMs);
+    prefs_.preloadFrames = juce::jlimit(SessionPrefs::kMinPreloadFrames, SessionPrefs::kMaxPreloadFrames,
+                                        prefs_.preloadFrames);
     applyPrefsToRuntime();
     syncParamsToEngine();
+    reloadSamplesForStreaming(); // no-op unless the preload size changed
 }
 
 void LooperAudioProcessor::syncParamsToEngine()
@@ -267,6 +360,7 @@ void LooperAudioProcessor::prepareToPlay(double sampleRate, int)
         else samplePool_.loadDemoSample(sampleRate);
     }
     voiceEngine_.setSamplePool(&samplePool_);
+    diskStreamer_.start();
     {
         std::lock_guard<std::mutex> lock(mapMutex_);
         if (mapShared_) voiceEngine_.adoptMap(mapShared_);
@@ -306,6 +400,8 @@ void LooperAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     }
     auto* left = buffer.getWritePointer(0);
     auto* right = buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : left;
+    // Offline bounce: streamed frames are read on this thread when not yet buffered (no underruns).
+    voiceEngine_.setNonRealtime(isNonRealtime());
     voiceEngine_.processBlock(left, right, buffer.getNumSamples());
 }
 
@@ -363,6 +459,11 @@ bool LooperAudioProcessor::applyPatch(const Patch& patch, juce::StringArray* mis
     std::vector<SampleRef> loadedRefs;
     loadedRefs.reserve(patch.samples.size());
 
+    // Streaming mode is part of the patch: decode in the patch's mode from the start.
+    loadIntoRam_ = patch.map.loadIntoRam;
+    importController_.setStreamingOptions(currentStreamingOptions());
+    samplePool_.beginBatch(); // publish all decoded samples at once, before the map swap
+
     for (const auto& refIn : patch.samples)
     {
         SampleRef ref = refIn;
@@ -397,6 +498,9 @@ bool LooperAudioProcessor::applyPatch(const Patch& patch, juce::StringArray* mis
         }
         loadedRefs.push_back(loaded.ref);
     }
+
+    ensureStreamingReady(); // rings exist before any streamed buffer becomes visible
+    samplePool_.endBatch();
 
     userSampleRefs_ = std::move(loadedRefs);
     swapPlayableMap(patch.map);
@@ -480,6 +584,7 @@ bool LooperAudioProcessor::relocateSample(const std::string& sampleId, const juc
         return false;
     }
 
+    ensureStreamingReady();
     *it = loaded.ref; // new absolute path; PatchStore::save rewrites it relative to the patch
     offlineSampleIds_.erase(std::remove(offlineSampleIds_.begin(), offlineSampleIds_.end(), sampleId),
                             offlineSampleIds_.end());

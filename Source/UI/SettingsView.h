@@ -9,8 +9,8 @@ class LooperAudioProcessor;
 
 namespace looper {
 
-/** Settings / preferences - left nav Engine | Mapping | MIDI | Files | About. */
-class SettingsView : public juce::Component
+/** Settings / preferences - left nav Engine | Mapping | MIDI | Files | Memory | About. */
+class SettingsView : public juce::Component, private juce::Timer
 {
 public:
     using BackFn = std::function<void()>;
@@ -24,8 +24,15 @@ public:
 
     void setBackCallback(BackFn fn) { onBack_ = std::move(fn); }
 
+    /** Open on the Memory tab (main-view memory chip). */
+    void showMemoryTab() { setTab(Tab::Memory); }
+
 private:
-    enum class Tab { Engine, Mapping, Midi, Files, About };
+    enum class Tab { Engine, Mapping, Midi, Files, Memory, About };
+    void timerCallback() override { refreshMemoryStatus(); }
+    void visibilityChanged() override;
+    void refreshMemoryStatus();
+    void applyMemoryFromUi();
 
     struct PrefRow
     {
@@ -59,6 +66,7 @@ private:
     juce::TextButton navMapping_ { "Mapping" };
     juce::TextButton navMidi_ { "MIDI" };
     juce::TextButton navFiles_ { "Files" };
+    juce::TextButton navMemory_ { "Memory" };
     juce::TextButton navAbout_ { "About" };
 
     juce::Label sectionTitle_, sectionSub_;
@@ -84,6 +92,11 @@ private:
     juce::Label patchPathValue_, missingPolicy_;
     juce::TextButton revealFolderBtn_ { "Reveal last patch folder" };
     PrefRow filesRows_[2];
+
+    // Memory (disk streaming)
+    juce::ComboBox ramBox_, preloadBox_;
+    juce::TextButton resetDropoutsBtn_ { "Reset dropout count" };
+    PrefRow memoryRows_[3];
 
     // About
     juce::Label aboutName_, aboutCompany_, aboutVersion_, aboutLink_;

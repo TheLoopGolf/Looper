@@ -129,6 +129,11 @@ struct InstrumentMap
     ModWheelTarget modWheelTarget = ModWheelTarget::FilterCutoff;
     /** Per-patch RR mode (.looper.json "roundRobinMode"; missing = Cycle). */
     RoundRobinMode rrMode = RoundRobinMode::Cycle;
+    /**
+     * Per-patch "Load fully into RAM" (.looper.json "loadIntoRam"; missing = false): decode every
+     * sample completely instead of preloading its head and streaming the rest from disk.
+     */
+    bool loadIntoRam = false;
 
     /** Indices of zones matching note + velocity, in map order (stable). */
     std::vector<size_t> matchingZoneIndices(int note, int velocity) const

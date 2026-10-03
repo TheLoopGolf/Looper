@@ -4,6 +4,7 @@
 #include "../Filter/SvfFilter.h"
 #include "../InstrumentMap/InstrumentMap.h"
 #include "../SamplePool/SamplePool.h"
+#include "DiskStreamer.h"
 #include "FastRng.h"
 #include "GainRamp.h"
 
@@ -47,6 +48,25 @@ struct Voice
     bool gated = false;
     /** Deferred release while sustain pedal is down. */
     bool pedalHeld = false;
+
+    // --- Disk streaming (buffer->isStreaming(): only the first residentFrames are in RAM) ---
+    bool streaming = false;
+    int64_t residentFrames = 0;
+    /** DiskStreamer slot feeding frames past the preload (-1 = none: preload only). */
+    int streamSlot = -1;
+    /** Cached readable ring window (refreshed when a frame falls outside it). */
+    DiskStreamer::Window streamWin;
+    /** Underrun fade: ramps to 0 while starved, back to 1 when data returns (no clicks). */
+    float streamGain = 1.0f;
+    bool starved = false;
+    float holdL = 0.0f, holdR = 0.0f;   // last good frame, faded out during an underrun
+};
+
+/** Streaming counters for the UI / tests. */
+struct StreamingEngineStats
+{
+    int streamingVoices = 0;     // active voices whose sample streams from disk
+    uint64_t underruns = 0;      // voice dropouts: a streamed frame was not on time
 };
 
 struct FilterParams
@@ -67,6 +87,9 @@ class VoiceEngine
 {
 public:
     VoiceEngine();
+    ~VoiceEngine();
+    VoiceEngine(const VoiceEngine&) = delete;
+    VoiceEngine& operator=(const VoiceEngine&) = delete;
 
     void setSampleRate(double sr);
     void setPolyphony(int n);
@@ -114,7 +137,34 @@ public:
     /** Alternates beyond this many in one RR group are ignored (stack scratch, no allocation). */
     static constexpr size_t kMaxRrAlternates = 128;
 
-    void setSamplePool(SamplePool* pool) { pool_ = pool; }
+    /**
+     * Message thread. The engine registers as a lock-free reader of the pool (hazard slot);
+     * the pool must outlive the engine (or be detached with setSamplePool(nullptr)).
+     */
+    void setSamplePool(SamplePool* pool);
+
+    /**
+     * Message thread, before playback: streamer that feeds voices whose sample is longer than
+     * its RAM preload. Without one, such voices play the preload and then fade out (underrun).
+     */
+    void setStreamer(DiskStreamer* streamer) { streamer_ = streamer; }
+    DiskStreamer* streamer() const noexcept { return streamer_; }
+
+    /**
+     * Offline / non-realtime rendering (host bounce, AudioProcessor::isNonRealtime): streamed
+     * frames that are not buffered yet are read on the calling thread (blocking) instead of
+     * underrunning, so a bounce is bit-identical to fully loaded playback. Lock-free flag.
+     */
+    void setNonRealtime(bool offline) noexcept { nonRealtime_.store(offline, std::memory_order_relaxed); }
+    bool nonRealtime() const noexcept { return nonRealtime_.load(std::memory_order_relaxed); }
+
+    /** Any thread. Underrun count is cumulative; resetUnderruns() clears it. */
+    StreamingEngineStats streamingStats() const noexcept;
+    uint64_t underrunCount() const noexcept { return underruns_.load(std::memory_order_relaxed); }
+    void resetUnderruns() noexcept { underruns_.store(0, std::memory_order_relaxed); }
+
+    /** Largest block processed in one pass; longer blocks are split (output is identical). */
+    static constexpr int kSubBlock = 256;
 
     void setEnvParams(const AmpEnv::Params& p);
     void setFilterParams(const FilterParams& p);
@@ -181,6 +231,13 @@ public:
 
 private:
     int allocateVoice(int note, int channel);
+    /** Audio thread, lock-free: current pool buffer for a sample id (snapshot pin + shared_ptr copy). */
+    std::shared_ptr<const SampleBuffer> lookupBuffer(const std::string& id) const noexcept;
+    void renderVoice(Voice& v, float* left, float* right, int numSamples, bool modulateCutoff,
+                     float envAmt, float baseCutoff) noexcept;
+    /** Hermite read of a streamed voice at v.readPos (preload / ring / underrun fade). */
+    void readStreamed(Voice& v, float& outL, float& outR) noexcept;
+    void endVoiceStream(Voice& v) noexcept;
     void startVoice(int voiceIndex, int note, int velocity, int channel, const Zone& zone,
                     std::shared_ptr<const SampleBuffer> buffer, int zoneIndex = -1);
     void refreshVoicesFromMap() noexcept;
@@ -201,6 +258,11 @@ private:
     std::shared_ptr<const InstrumentMap> pendingMap_;
     std::atomic<bool> pendingMapReady_ { false };
     SamplePool* pool_ = nullptr;
+    int poolReader_ = -1;
+    DiskStreamer* streamer_ = nullptr;
+    std::atomic<bool> nonRealtime_ { false };
+    std::atomic<uint64_t> underruns_ { 0 };
+    std::atomic<int> streamingVoices_ { 0 };
     AmpEnv::Params envParams_;
     FilterParams filterParams_;
     float masterGainLin_ = 1.0f;

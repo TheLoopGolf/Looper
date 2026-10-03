@@ -3,6 +3,7 @@
 #include "LooperLookAndFeel.h"
 #include "../Plugin/PluginProcessor.h"
 #include "../AutoMapper/FilenameTokens.h"
+#include "../SamplePool/MemoryFormat.h"
 
 namespace looper {
 namespace {
@@ -70,6 +71,7 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     wireNav(navMapping_, Tab::Mapping);
     wireNav(navMidi_, Tab::Midi);
     wireNav(navFiles_, Tab::Files);
+    wireNav(navMemory_, Tab::Memory);
     wireNav(navAbout_, Tab::About);
 
     sectionTitle_.setFont(juce::FontOptions(16.0f, juce::Font::bold));
@@ -227,6 +229,35 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     revealFolderBtn_.onClick = [this] { revealLastPatchFolder(); };
     addAndMakeVisible(revealFolderBtn_);
 
+    // --- Memory (disk streaming) ---
+    ramBox_.addItem("Stream long samples", 1);
+    ramBox_.addItem("Load fully into RAM", 2);
+    ramBox_.onChange = [this] { applyMemoryFromUi(); };
+    for (int k : { 16, 32, 64, 128, 256, 512, 1024 })
+    {
+        juce::String label = juce::String(k) + "k frames";
+        label << glyph::dotSep() << juce::String((double) k * 1024.0 / 44100.0, 1) << " s";
+        if (k == 64)
+            label << " (default)";
+        preloadBox_.addItem(label, k);
+    }
+    preloadBox_.onChange = [this] { applyMemoryFromUi(); };
+
+    initRow(memoryRows_[0], "Sample memory",
+            glyph::spaced("Saved per patch", glyph::emDash(),
+                          "load fully for small patches; streaming keeps big libraries light"),
+            &ramBox_);
+    initRow(memoryRows_[1], "Preload size",
+            "RAM head of each sample (plays instantly); the rest streams from disk", &preloadBox_);
+    // Live status line in the row description; reset button on the right.
+    initRow(memoryRows_[2], "Status", {}, nullptr);
+    memoryRows_[2].extra = &resetDropoutsBtn_;
+
+    resetDropoutsBtn_.setColour(juce::TextButton::buttonColourId, kPanel());
+    resetDropoutsBtn_.setColour(juce::TextButton::textColourOffId, kText());
+    resetDropoutsBtn_.onClick = [this] { processor_.resetUnderruns(); refreshMemoryStatus(); };
+    addAndMakeVisible(resetDropoutsBtn_);
+
     // --- About ---
     aboutName_.setText("Looper", juce::dontSendNotification);
     aboutName_.setFont(juce::FontOptions(18.0f, juce::Font::bold));
@@ -282,6 +313,11 @@ void SettingsView::setTab(Tab t)
             sectionTitle_.setText("Files", juce::dontSendNotification);
             sectionSub_.setText("Patch paths and missing-sample policy.", juce::dontSendNotification);
             break;
+        case Tab::Memory:
+            sectionTitle_.setText("Memory", juce::dontSendNotification);
+            sectionSub_.setText(glyph::spaced("Disk streaming", glyph::middleDot(), "preload in RAM, the rest from disk"),
+                                juce::dontSendNotification);
+            break;
         case Tab::About:
             sectionTitle_.setText("About", juce::dontSendNotification);
             sectionSub_.setText(glyph::spaced("Looper", glyph::middleDot(), "Loop Audio Lab"), juce::dontSendNotification);
@@ -305,6 +341,7 @@ void SettingsView::updateNavStyles()
     paintNav(navMapping_, tab_ == Tab::Mapping);
     paintNav(navMidi_, tab_ == Tab::Midi);
     paintNav(navFiles_, tab_ == Tab::Files);
+    paintNav(navMemory_, tab_ == Tab::Memory);
     paintNav(navAbout_, tab_ == Tab::About);
 }
 
@@ -315,6 +352,7 @@ void SettingsView::updateVisibility()
     auto setMidi = tab_ == Tab::Midi;
     auto setFiles = tab_ == Tab::Files;
     auto setAbout = tab_ == Tab::About;
+    auto setMemory = tab_ == Tab::Memory;
 
     for (auto& r : engineRows_)
     {
@@ -344,6 +382,14 @@ void SettingsView::updateVisibility()
         if (r.extra) r.extra->setVisible(setFiles);
     }
     revealFolderBtn_.setVisible(setFiles);
+
+    for (auto& r : memoryRows_)
+    {
+        r.title.setVisible(setMemory);
+        r.desc.setVisible(setMemory);
+        if (r.combo) r.combo->setVisible(setMemory);
+        if (r.extra) r.extra->setVisible(setMemory);
+    }
 
     aboutName_.setVisible(setAbout);
     aboutCompany_.setVisible(setAbout);
@@ -393,6 +439,16 @@ void SettingsView::refreshFromProcessor()
 
     bendBox_.setSelectedId(1, juce::dontSendNotification);
     modBox_.setSelectedId(p.modWheelTarget == ModWheelTarget::Volume ? 2 : 1, juce::dontSendNotification);
+
+    ramBox_.setSelectedId(processor_.loadIntoRam() ? 2 : 1, juce::dontSendNotification);
+    {
+        const int k = juce::jmax(1, p.preloadFrames / 1024);
+        if (preloadBox_.indexOfItemId(k) < 0)
+            preloadBox_.addItem(juce::String(formatPreloadFrames(p.preloadFrames)), k);
+        preloadBox_.setSelectedId(k, juce::dontSendNotification);
+        preloadBox_.setEnabled(! processor_.loadIntoRam());
+    }
+    refreshMemoryStatus();
 
     const auto& path = processor_.lastPatchPath();
     patchPathValue_.setText(path.isNotEmpty() ? path : "(none yet)", juce::dontSendNotification);
@@ -469,6 +525,44 @@ void SettingsView::applyMidiFromUi()
     processor_.applySessionPrefs(prefs);
 }
 
+void SettingsView::visibilityChanged()
+{
+    if (isVisible())
+        startTimerHz(2);
+    else
+        stopTimer();
+}
+
+void SettingsView::refreshMemoryStatus()
+{
+    const auto st = processor_.memoryStatus();
+    const auto d = describeMemory(st.ramBytes, st.streamingSamples, st.underruns);
+    juce::String line = juce::String(d.ram) + glyph::dotSep() + juce::String(d.state);
+    line << glyph::dotSep() << st.streamingSamples << " of " << st.samples << " samples streamed"
+         << glyph::dotSep() << st.activeStreams << (st.activeStreams == 1 ? " voice" : " voices")
+         << " streaming now"
+         << glyph::dotSep() << juce::String((juce::int64) st.underruns)
+         << (st.underruns == 1 ? " dropout" : " dropouts");
+    memoryRows_[2].desc.setText(line, juce::dontSendNotification);
+    memoryRows_[2].desc.setColour(juce::Label::textColourId,
+                                  d.tone == MemoryTone::Warning ? Palette::sand() : kText());
+    resetDropoutsBtn_.setEnabled(st.underruns > 0);
+}
+
+void SettingsView::applyMemoryFromUi()
+{
+    const bool fully = ramBox_.getSelectedId() == 2;
+    preloadBox_.setEnabled(! fully);
+    if (const int k = preloadBox_.getSelectedId(); k > 0 && k * 1024 != processor_.sessionPrefs().preloadFrames)
+    {
+        auto prefs = processor_.sessionPrefs();
+        prefs.preloadFrames = k * 1024;
+        processor_.applySessionPrefs(prefs); // re-decodes streamed samples with the new preload
+    }
+    processor_.setLoadIntoRam(fully);
+    refreshMemoryStatus();
+}
+
 void SettingsView::revealLastPatchFolder()
 {
     const auto& path = processor_.lastPatchPath();
@@ -514,7 +608,8 @@ void SettingsView::paint(juce::Graphics& g)
         case Tab::Mapping: selIndex = 1; break;
         case Tab::Midi: selIndex = 2; break;
         case Tab::Files: selIndex = 3; break;
-        case Tab::About: selIndex = 4; break;
+        case Tab::Memory: selIndex = 4; break;
+        case Tab::About: selIndex = 5; break;
     }
     const float uy = nav.getY() + 4.0f + (float) selIndex * (float) navH + (float) navH - 4.0f;
     g.setColour(Palette::fairway());
@@ -559,6 +654,7 @@ void SettingsView::resized()
     navMapping_.setBounds(navCol.removeFromTop(navH).reduced(4, 2));
     navMidi_.setBounds(navCol.removeFromTop(navH).reduced(4, 2));
     navFiles_.setBounds(navCol.removeFromTop(navH).reduced(4, 2));
+    navMemory_.setBounds(navCol.removeFromTop(navH).reduced(4, 2));
     navAbout_.setBounds(navCol.removeFromTop(navH).reduced(4, 2));
 
     body.removeFromLeft(12);
@@ -590,6 +686,9 @@ void SettingsView::resized()
         case Tab::Files:
             layoutRows(body, filesRows_, 2);
             revealFolderBtn_.setBounds(body.removeFromTop(36).removeFromLeft(220).reduced(0, 4));
+            break;
+        case Tab::Memory:
+            layoutRows(body, memoryRows_, 3);
             break;
         case Tab::About:
             aboutName_.setBounds(body.removeFromTop(28));

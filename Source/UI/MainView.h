@@ -18,13 +18,15 @@ namespace looper {
 
 class MainView : public juce::Component,
                  public juce::FileDragAndDropTarget,
-                 private juce::ChangeListener
+                 private juce::ChangeListener,
+                 private juce::Timer
 {
 public:
     using ImportFn = std::function<void(const juce::Array<juce::File>&)>;
     using ReviewFn = std::function<void()>;
     using SettingsFn = std::function<void()>;
     using RelocateFn = std::function<void()>;
+    using MemoryFn = std::function<void()>;
 
     explicit MainView (LooperAudioProcessor& processor);
     ~MainView() override;
@@ -43,6 +45,10 @@ public:
     void setSettingsCallback (SettingsFn fn) { onSettings_ = std::move (fn); }
     /** Opens the Relocate screen (banner click, or automatically after loading a patch with missing files). */
     void setRelocateCallback (RelocateFn fn) { onRelocate_ = std::move (fn); }
+    /** Memory chip click (opens Settings > Memory). */
+    void setMemoryCallback (MemoryFn fn) { onMemory_ = std::move (fn); }
+    /** Refresh the "RAM 42 MB . Streaming" chip (also runs on a 4 Hz timer while visible). */
+    void updateMemoryChip();
     void refreshFromProcessor();
 
     /** Select a zone (index into the processor's map; -1 = none) in list, strip and editor. */
@@ -59,6 +65,8 @@ public:
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    void timerCallback() override { updateMemoryChip(); }
+    void visibilityChanged() override;
     /** Rebuild zone rows, strip, status and editor after an edit / undo / redo. */
     void refreshZoneViews();
     void rebuildZoneRows();
@@ -86,6 +94,7 @@ private:
     ReviewFn onReview_;
     SettingsFn onSettings_;
     RelocateFn onRelocate_;
+    MemoryFn onMemory_;
 
     LooperLookAndFeel lookAndFeel_;
 
@@ -97,6 +106,7 @@ private:
     juce::TextButton saveBtn_ { "Save" };
     GearButton settingsBtn_;     // vector gear: no font glyph needed
     juce::TextButton missingBanner_;
+    MemoryChip memoryChip_;      // header: RAM use + streaming state
 
     // Round-robin mode (APVTS "rrMode", saved per patch) in the SAMPLES card header
     juce::Label rrLabel_;

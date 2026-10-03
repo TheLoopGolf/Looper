@@ -1,4 +1,5 @@
 #include "ImportController.h"
+#include "FileStreamSource.h"
 #include <algorithm>
 #include <cstdio>
 #include <functional>
@@ -6,30 +7,15 @@
 namespace looper {
 namespace {
 
-void downmixToStereo(juce::AudioBuffer<float>& buffer)
-{
-    const int ch = buffer.getNumChannels();
-    const int n = buffer.getNumSamples();
-    if (ch <= 2 || n <= 0) return;
-    juce::AudioBuffer<float> stereo(2, n);
-    stereo.clear();
-    const float scale = 1.0f / (float) ch;
-    for (int c = 0; c < ch; ++c)
-        stereo.addFrom(c % 2, 0, buffer, c, 0, n, scale);
-    buffer = std::move(stereo);
-}
-
 SampleBuffer toInterleaved(const juce::AudioBuffer<float>& planar, double sr)
 {
     SampleBuffer out;
     out.channels = std::min(2, std::max(1, planar.getNumChannels()));
     out.sampleRate = sr > 0.0 ? sr : 44100.0;
     out.length = planar.getNumSamples();
+    out.residentFrames = out.length;
     out.interleaved.resize((size_t) (out.length * out.channels));
-    for (int i = 0; i < planar.getNumSamples(); ++i)
-        for (int c = 0; c < out.channels; ++c)
-            out.interleaved[(size_t) (i * out.channels + c)] =
-                planar.getReadPointer(std::min(c, planar.getNumChannels() - 1))[i];
+    FileStreamSource::interleave(planar, out.channels, planar.getNumSamples(), out.interleaved.data());
     return out;
 }
 
@@ -107,17 +93,9 @@ LoadedSample ImportController::loadFileIntoPool(const juce::File& file, SamplePo
     if (result.ref.displayName.empty())
         result.ref.displayName = file.getFileName().toStdString();
 
-    std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
-    if (!reader) { result.error = "Unsupported: " + file.getFileName(); return result; }
-    if (reader->lengthInSamples <= 0) { result.error = "Empty: " + file.getFileName(); return result; }
-
-    constexpr int64_t kMax = 48000LL * 60 * 30;
-    const int n = (int) std::min<juce::int64>(reader->lengthInSamples, kMax);
-    juce::AudioBuffer<float> planar(std::max(1, (int) reader->numChannels), n);
-    reader->read(&planar, 0, n, 0, true, true);
-    if (planar.getNumChannels() > 2) downmixToStereo(planar);
-
-    auto buf = toInterleaved(planar, reader->sampleRate);
+    SampleBuffer buf;
+    if (!decodeFile(file, buf, result.error))
+        return result;
     result.ref.durationSamples = buf.length;
     result.ref.sampleRate = buf.sampleRate;
     result.ref.channels = buf.channels;
@@ -128,6 +106,34 @@ LoadedSample ImportController::loadFileIntoPool(const juce::File& file, SamplePo
     return result;
 }
 
+bool ImportController::decodeFile(const juce::File& file, SampleBuffer& out, juce::String& error)
+{
+    prepareFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
+    if (!reader) { error = "Unsupported: " + file.getFileName(); return false; }
+    if (reader->lengthInSamples <= 0) { error = "Empty: " + file.getFileName(); return false; }
+
+    constexpr int64_t kMax = 48000LL * 60 * 30;
+    const int64_t total = std::min<int64_t>(reader->lengthInSamples, kMax);
+    const int64_t preload = std::max<int64_t>(1, streaming_.preloadFrames);
+    // Short samples (<= preload) and "Load fully into RAM" decode everything.
+    const bool stream = !streaming_.loadFully && total > preload;
+    const int n = (int) (stream ? preload : total);
+
+    juce::AudioBuffer<float> planar(std::max(1, (int) reader->numChannels), n);
+    if (!reader->read(&planar, 0, n, 0, true, true)) { error = "Unreadable: " + file.getFileName(); return false; }
+    if (planar.getNumChannels() > 2) FileStreamSource::downmixToStereo(planar);
+
+    out = toInterleaved(planar, reader->sampleRate);
+    if (stream)
+    {
+        out.length = total;
+        out.residentFrames = n;
+        out.stream = std::make_shared<FileStreamSource>(file, out.channels, total);
+    }
+    return true;
+}
+
 bool ImportController::importFiles(const juce::Array<juce::File>& files, SamplePool& pool,
                                    const std::vector<SampleRef>& existingUserRefs,
                                    AutoMapOptions options)
@@ -136,6 +142,7 @@ bool ImportController::importFiles(const juce::Array<juce::File>& files, SampleP
     if (audio.isEmpty() && existingUserRefs.empty()) { clearPending(); return false; }
 
     std::vector<SampleRef> refs = existingUserRefs;
+    SamplePool::ScopedBatch batch(pool); // one snapshot for the whole import
     for (const auto& f : audio) {
         auto loaded = loadFileIntoPool(f, pool);
         if (!loaded.ok) continue;
@@ -184,9 +191,28 @@ PitchAnalysis ImportController::analysePitch(const std::string& sampleId, const 
 {
     if (const auto it = pitchCache_.find(sampleId); it != pitchCache_.end())
         return it->second;
+    PitchAnalysis a;
+    if (buffer.isStreaming())
+    {
+        // Streamed sample: analyse the first few seconds (the detector looks at <= 1.5 s after
+        // the onset), read through the stream like playback would.
+        const int ch = std::max(1, buffer.channels);
+        const int64_t want = std::min<int64_t>(buffer.length,
+                                               std::max<int64_t>(buffer.residentLength(),
+                                                                 (int64_t) (buffer.sampleRate * 8.0)));
+        std::vector<float> window((size_t) (want * ch));
+        const int64_t got = buffer.copyFrames(0, want, window.data());
+        if (got > 0)
+            a = PitchDetector::analyzeInterleaved(window.data(), (std::size_t) got, ch, buffer.sampleRate);
+        else {
+            a.analysed = true;
+            a.reason = "no audio";
+        }
+        pitchCache_[sampleId] = a;
+        return a;
+    }
     const auto frames = static_cast<std::size_t>(std::max<int64_t>(0, buffer.length));
     const auto needed = frames * static_cast<std::size_t>(std::max(1, buffer.channels));
-    PitchAnalysis a;
     if (frames > 0 && buffer.interleaved.size() >= needed)
         a = PitchDetector::analyzeInterleaved(buffer.interleaved.data(), frames,
                                               buffer.channels, buffer.sampleRate);

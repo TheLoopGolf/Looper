@@ -209,4 +209,95 @@ void GearButton::paintButton (juce::Graphics& g, bool highlighted, bool down)
     g.fillPath (makeGearPath (iconArea));
 }
 
+// --- MemoryChip ---------------------------------------------------------------------------------
+
+MemoryChip::MemoryChip()
+{
+    setMouseCursor (juce::MouseCursor::PointingHandCursor);
+    setTitle ("Sample memory");
+}
+
+void MemoryChip::setStatus (const juce::String& text, Tone tone, bool active)
+{
+    if (text == text_ && tone == tone_ && active == active_)
+        return;
+    text_ = text;
+    tone_ = tone;
+    active_ = active;
+    setDescription (text_);
+    repaint();
+}
+
+int MemoryChip::idealWidth() const
+{
+    juce::GlyphArrangement ga;
+    ga.addLineOfText (juce::Font (juce::FontOptions (11.5f)), text_, 0.0f, 0.0f);
+    // side padding 8+8, ball, speed lines (9), gap 7, plus slack for font hinting
+    return (int) std::ceil (ga.getBoundingBox (0, -1, true).getWidth()) + 58;
+}
+
+void MemoryChip::drawGolfBall (juce::Graphics& g, juce::Rectangle<float> area, juce::Colour tint, bool inFlight)
+{
+    const float d = juce::jmin (area.getWidth(), area.getHeight());
+    auto ball = area.withSizeKeepingCentre (d, d);
+    if (inFlight)
+    {
+        // Speed lines trailing to the left of the ball
+        g.setColour (tint.withAlpha (0.55f));
+        for (int i = 0; i < 3; ++i)
+        {
+            const float y = ball.getY() + d * (0.30f + 0.20f * (float) i);
+            const float len = d * (i == 1 ? 0.75f : 0.5f);
+            g.drawLine (ball.getX() - len - 1.0f, y, ball.getX() - 1.5f, y, 1.1f);
+        }
+    }
+    juce::ColourGradient shade (juce::Colours::white, ball.getX() + d * 0.3f, ball.getY() + d * 0.25f,
+                                tint.interpolatedWith (juce::Colours::white, 0.35f), ball.getRight(), ball.getBottom(), true);
+    g.setGradientFill (shade);
+    g.fillEllipse (ball);
+    g.setColour (tint.darker (0.6f).withAlpha (0.9f));
+    g.drawEllipse (ball.reduced (0.4f), 0.8f);
+    // Dimples
+    g.setColour (tint.darker (0.8f).withAlpha (0.45f));
+    const float r = juce::jmax (0.7f, d * 0.07f);
+    const float pts[][2] = { { 0.35f, 0.38f }, { 0.58f, 0.32f }, { 0.48f, 0.55f }, { 0.70f, 0.52f },
+                             { 0.33f, 0.64f }, { 0.58f, 0.74f } };
+    for (const auto& p : pts)
+        g.fillEllipse (ball.getX() + d * p[0] - r, ball.getY() + d * p[1] - r, r * 2.0f, r * 2.0f);
+}
+
+void MemoryChip::paint (juce::Graphics& g)
+{
+    auto b = getLocalBounds().toFloat().reduced (0.5f);
+    const juce::Colour tint = tone_ == Tone::Warning   ? Palette::sand()
+                            : tone_ == Tone::Streaming ? Palette::fairway()
+                                                       : Palette::brass();
+    g.setColour (tone_ == Tone::Warning ? juce::Colour (0xff3a3212) : Palette::bgSunken());
+    g.fillRoundedRectangle (b, b.getHeight() * 0.5f);
+    g.setColour ((hover_ ? tint : Palette::border()).withAlpha (hover_ ? 0.9f : 1.0f));
+    g.drawRoundedRectangle (b, b.getHeight() * 0.5f, 1.0f);
+
+    auto inner = b.reduced (8.0f, 0.0f);
+    const float ballD = juce::jmin (12.0f, b.getHeight() - 10.0f);
+    const bool flight = tone_ != Tone::InRam;
+    auto ballArea = inner.removeFromLeft (ballD + (flight ? 9.0f : 0.0f)).withTrimmedLeft (flight ? 9.0f : 0.0f);
+    drawGolfBall (g, ballArea, tint, flight);
+    if (active_)
+    {
+        // A voice is streaming right now: small fairway pip
+        g.setColour (Palette::fairway());
+        g.fillEllipse (ballArea.getRight() - 2.0f, ballArea.getCentreY() - ballD * 0.5f - 1.0f, 4.0f, 4.0f);
+    }
+    inner.removeFromLeft (7.0f);
+    g.setColour (tone_ == Tone::Warning ? Palette::sand() : Palette::text().withAlpha (0.88f));
+    g.setFont (juce::Font (juce::FontOptions (11.5f)));
+    g.drawText (text_, inner, juce::Justification::centredLeft, true);
+}
+
+void MemoryChip::mouseUp (const juce::MouseEvent& e)
+{
+    if (e.mouseWasClicked() && getLocalBounds().contains (e.getPosition()) && onClick)
+        onClick();
+}
+
 } // namespace looper

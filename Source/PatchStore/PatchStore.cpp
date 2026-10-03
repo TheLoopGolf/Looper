@@ -557,6 +557,8 @@ void writeMap(JsonWriter& w, const InstrumentMap& map)
     w.stringVal(PatchStore::modWheelTargetToString(map.modWheelTarget));
     w.key("roundRobinMode");
     w.stringVal(PatchStore::roundRobinModeToString(map.rrMode));
+    w.key("loadIntoRam");
+    w.boolVal(map.loadIntoRam);
     w.key("zones");
     w.beginArray();
     for (const auto& z : map.zones)
@@ -650,6 +652,8 @@ InstrumentMap readMap(const JsonValue& v)
         if (auto s = x->asString())
             if (auto m = PatchStore::roundRobinModeFromString(*s))
                 map.rrMode = *m;
+    // Disk streaming (added with v1.2 streaming): absent -> stream long samples (false).
+    if (auto* x = v.find("loadIntoRam")) if (auto b = x->asBool()) map.loadIntoRam = *b;
     if (auto* zones = v.find("zones"); zones && zones->type == JsonValue::Type::Array)
         for (const auto& zv : zones->a)
             map.zones.push_back(readZone(zv));

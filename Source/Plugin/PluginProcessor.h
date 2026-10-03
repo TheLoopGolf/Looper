@@ -160,6 +160,36 @@ public:
      */
     void auditionZone(int zoneIndex, bool down);
 
+    // --- Disk streaming / sample memory ------------------------------------------------------
+    /** Per-patch "Load fully into RAM" (saved in the patch and host session). */
+    bool loadIntoRam() const { return loadIntoRam_; }
+    /**
+     * Message thread: switch between streaming and fully-in-RAM for this patch. Re-decodes the
+     * patch's samples in the new mode (sounding notes finish on their old buffers) and marks the
+     * patch unsaved. No-op if unchanged.
+     */
+    void setLoadIntoRam(bool fully);
+
+    struct MemoryStatus
+    {
+        size_t ramBytes = 0;          // resident sample audio + stream rings
+        size_t sampleBytes = 0;       // resident sample audio only
+        size_t fullBytes = 0;         // the same samples fully decoded
+        size_t ringBytes = 0;
+        int samples = 0;
+        int streamingSamples = 0;     // samples whose tail streams from disk
+        int activeStreams = 0;        // voices streaming right now
+        uint64_t underruns = 0;       // dropouts since load (or resetUnderruns)
+        bool loadIntoRam = false;
+        int preloadFrames = 0;
+    };
+    /** Message thread (UI chip / Settings). Cheap: one pass over the pool under its lock. */
+    MemoryStatus memoryStatus() const;
+    void resetUnderruns() { voiceEngine_.resetUnderruns(); }
+
+    looper::DiskStreamer& diskStreamer() { return diskStreamer_; }
+    VoiceEngine& voiceEngine() { return voiceEngine_; }
+
     const SessionPrefs& sessionPrefs() const { return prefs_; }
     /** Apply prefs to engine / map / APVTS defaults and remember for persistence. */
     void applySessionPrefs(const SessionPrefs& prefs);
@@ -171,9 +201,23 @@ private:
     void swapPlayableMap(InstrumentMap newMap);
     void pushPrefsOntoMap(InstrumentMap& map) const;
     void applyPrefsToRuntime();
+    looper::StreamingOptions currentStreamingOptions() const;
+    /** Re-decode every loaded user sample with the current streaming options. */
+    void reloadSamplesForStreaming();
+    /** Allocate stream rings once any loaded sample actually streams. */
+    void ensureStreamingReady();
 
     juce::AudioProcessorValueTreeState apvts_;
+    // Declaration order matters: the pool and streamer must outlive the voice engine.
     SamplePool samplePool_;
+    looper::DiskStreamer diskStreamer_;
+    bool loadIntoRam_ = false;
+    /** Message-thread housekeeping: frees replaced buffers / old pool snapshots. */
+    struct PoolGcTimer : juce::Timer
+    {
+        SamplePool* pool = nullptr;
+        void timerCallback() override { if (pool) pool->collectGarbage(); }
+    } poolGc_;
     ImportController importController_;
     SessionPrefs prefs_;
 

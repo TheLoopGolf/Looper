@@ -8,6 +8,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(LOOPER_BUILD_PLUGIN "Fetch JUCE and build the VST3/AU plugin target" ON)
 option(LOOPER_BUILD_TESTS "Build unit tests" ON)
+option(LOOPER_BUILD_BENCH "Build the StreamingBench tool (needs LOOPER_BUILD_PLUGIN)" OFF)
 
 # ---------------------------------------------------------------------------
 # AutoMapper library (no JUCE — tests & tools can link this on any host)
@@ -27,6 +28,7 @@ target_compile_features(LooperAutoMapper PUBLIC cxx_std_20)
 # ---------------------------------------------------------------------------
 add_library(LooperDsp STATIC
     Source/VoiceEngine/VoiceEngine.cpp
+    Source/VoiceEngine/DiskStreamer.cpp
 )
 target_include_directories(LooperDsp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/Source
@@ -39,6 +41,9 @@ find_library(LOOPER_LIBM m)
 if(LOOPER_LIBM)
     target_link_libraries(LooperDsp PUBLIC ${LOOPER_LIBM})
 endif()
+# DiskStreamer reader threads
+find_package(Threads REQUIRED)
+target_link_libraries(LooperDsp PUBLIC Threads::Threads)
 
 # ---------------------------------------------------------------------------
 # Patch JSON library (no JUCE — InstrumentMap + SampleRef serialize)
@@ -110,6 +115,13 @@ if(LOOPER_BUILD_TESTS)
     target_link_libraries(PitchMappingTests PRIVATE LooperAutoMapper LooperPatch)
     add_test(NAME PitchMappingTests COMMAND PitchMappingTests)
 
+    # Disk streaming: bit-exact vs fully loaded playback, boundary crossing, underruns, slot reuse,
+    # offline rendering, no audio-thread allocation, many voices. With JUCE (below) also the real
+    # file path (ImportController preload decode + FileStreamSource).
+    add_executable(StreamingTests Tests/StreamingTests.cpp)
+    target_link_libraries(StreamingTests PRIVATE LooperDsp LooperPatch)
+    add_test(NAME StreamingTests COMMAND StreamingTests)
+
     # Mojibake guard: non-ASCII UI text must go through Source/UI/Glyphs.h
     add_executable(SourceEncodingTests Tests/SourceEncodingTests.cpp)
     target_compile_definitions(SourceEncodingTests PRIVATE
@@ -162,6 +174,8 @@ if(LOOPER_BUILD_PLUGIN)
             Source/Plugin/PluginEditor.h
             Source/Import/ImportController.cpp
             Source/Import/ImportController.h
+            Source/Import/FileStreamSource.cpp
+            Source/Import/FileStreamSource.h
             Source/Import/MapCommit.h
             Source/UI/MainView.cpp
             Source/UI/MainView.h
@@ -180,6 +194,8 @@ if(LOOPER_BUILD_PLUGIN)
             Source/UI/Glyphs.h
             Source/Prefs/SessionPrefs.h
             Source/SamplePool/SamplePool.h
+            Source/SamplePool/SampleStream.h
+            Source/VoiceEngine/DiskStreamer.h
             Source/InstrumentMap/InstrumentMap.h
             Source/VoiceEngine/VoiceEngine.h
             Source/VoiceEngine/Hermite.h
@@ -273,4 +289,41 @@ if(LOOPER_BUILD_TESTS)
             JUCE_WEB_BROWSER=0)
     endif()
     add_test(NAME ZoneStripTests COMMAND ZoneStripTests)
+
+    if(LOOPER_BUILD_PLUGIN)
+        target_sources(StreamingTests PRIVATE
+            Source/Import/FileStreamSource.cpp
+            Source/Import/ImportController.cpp)
+        target_link_libraries(StreamingTests PRIVATE
+            LooperAutoMapper
+            juce::juce_audio_formats
+            juce::juce_recommended_config_flags)
+        target_compile_definitions(StreamingTests PRIVATE
+            LOOPER_STREAMING_WITH_JUCE=1
+            JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+            JUCE_STANDALONE_APPLICATION=1
+            JUCE_USE_CURL=0
+            JUCE_WEB_BROWSER=0)
+    endif()
+endif()
+
+# ---------------------------------------------------------------------------
+# Disk-streaming benchmark (optional; generates a large WAV library, compares load time / RAM
+# of streaming vs fully loaded, plays 64 voices offline and real-time paced)
+# ---------------------------------------------------------------------------
+if(LOOPER_BUILD_BENCH AND LOOPER_BUILD_PLUGIN)
+    add_executable(StreamingBench
+        Tools/StreamingBench.cpp
+        Source/Import/FileStreamSource.cpp
+        Source/Import/ImportController.cpp)
+    target_include_directories(StreamingBench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
+    target_link_libraries(StreamingBench PRIVATE
+        LooperDsp LooperAutoMapper
+        juce::juce_audio_formats
+        juce::juce_recommended_config_flags)
+    target_compile_definitions(StreamingBench PRIVATE
+        JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+        JUCE_STANDALONE_APPLICATION=1
+        JUCE_USE_CURL=0
+        JUCE_WEB_BROWSER=0)
 endif()

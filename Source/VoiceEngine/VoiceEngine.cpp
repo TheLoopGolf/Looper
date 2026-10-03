@@ -21,6 +21,56 @@ VoiceEngine::VoiceEngine()
     voices_.resize(static_cast<size_t>(polyphony_));
 }
 
+VoiceEngine::~VoiceEngine()
+{
+    for (auto& v : voices_)
+        endVoiceStream(v);
+    if (pool_ != nullptr)
+        pool_->unregisterReader(poolReader_);
+}
+
+void VoiceEngine::setSamplePool(SamplePool* pool)
+{
+    if (pool == pool_)
+        return;
+    if (pool_ != nullptr)
+        pool_->unregisterReader(poolReader_);
+    pool_ = pool;
+    poolReader_ = pool_ != nullptr ? pool_->registerReader() : -1;
+}
+
+std::shared_ptr<const SampleBuffer> VoiceEngine::lookupBuffer(const std::string& id) const noexcept
+{
+    if (pool_ == nullptr)
+        return {};
+    if (poolReader_ >= 0)
+    {
+        // Lock-free: pin the published snapshot, copy the shared_ptr (atomic increment).
+        if (const PoolSnapshot* snap = pool_->pin(poolReader_))
+            if (const auto* found = snap->find(id))
+                return *found;
+        return {};
+    }
+    // More than SamplePool::kMaxReaders engines on one pool: locking fallback.
+    return pool_->getBuffer(id);
+}
+
+void VoiceEngine::endVoiceStream(Voice& v) noexcept
+{
+    if (v.streamSlot >= 0 && streamer_ != nullptr)
+        streamer_->release(v.streamSlot);
+    v.streamSlot = -1;
+    v.streamWin = {};
+}
+
+StreamingEngineStats VoiceEngine::streamingStats() const noexcept
+{
+    StreamingEngineStats st;
+    st.streamingVoices = streamingVoices_.load(std::memory_order_relaxed);
+    st.underruns = underruns_.load(std::memory_order_relaxed);
+    return st;
+}
+
 void VoiceEngine::setSampleRate(double sr)
 {
     sampleRate_ = sr > 0.0 ? sr : 44100.0;
@@ -34,6 +84,8 @@ void VoiceEngine::setSampleRate(double sr)
 void VoiceEngine::setPolyphony(int n)
 {
     polyphony_ = std::clamp(n, 1, 128);
+    for (size_t i = static_cast<size_t>(polyphony_); i < voices_.size(); ++i)
+        endVoiceStream(voices_[i]); // dropped voices give their stream slots back
     voices_.resize(static_cast<size_t>(polyphony_));
     for (auto& v : voices_)
     {
@@ -480,7 +532,20 @@ void VoiceEngine::startVoice(int voiceIndex, int note, int velocity, int channel
     v.age = ++ageCounter_;
     v.readPos = zone.sampleStart.has_value() ? static_cast<double>(*zone.sampleStart) : 0.0;
     v.zone = zone;
-    v.buffer = std::move(buffer);
+    endVoiceStream(v);            // stolen / retriggered voice frees its old stream slot first
+    v.buffer = std::move(buffer); // previous buffer: refcount decrement only (pool keeps it alive)
+    v.streaming = v.buffer && v.buffer->isStreaming();
+    v.residentFrames = v.buffer ? v.buffer->residentLength() : 0;
+    v.streamGain = 1.0f;
+    v.starved = false;
+    v.holdL = v.holdR = 0.0f;
+    if (v.streaming && streamer_ != nullptr)
+    {
+        // Ring starts where the preload ends: the voice plays the preload instantly meanwhile.
+        v.streamSlot = streamer_->acquire(v.buffer, static_cast<int64_t>(std::floor(v.readPos)) - 1);
+        if (v.streamSlot < 0)
+            streamer_->noteExhausted();
+    }
     v.releasing = false;
     v.gated = true;
     v.pedalHeld = false;
@@ -527,8 +592,7 @@ void VoiceEngine::noteOn(int note, int velocity, int channel)
     {
         zone = *z;
         zoneIndex = static_cast<int>(z - map_->zones.data());
-        if (pool_)
-            buffer = pool_->getBuffer(zone.sampleId);
+        buffer = lookupBuffer(zone.sampleId);
         // Offline zone (sample file missing, awaiting relocation): stay silent rather
         // than substituting the demo tone.
         if (!buffer && zone.sampleId != kDemoSampleId)
@@ -541,13 +605,8 @@ void VoiceEngine::noteOn(int note, int velocity, int channel)
         zoneIndex = -1;
         zone = makeDemoZone();
         zone.rootKey = 60;
-        if (pool_)
-            buffer = pool_->getBuffer(kDemoSampleId);
-        if (!buffer && pool_)
-        {
-            pool_->loadDemoSample(sampleRate_);
-            buffer = pool_->getBuffer(kDemoSampleId);
-        }
+        // The host installs the demo tone up front (no decoding / allocation here).
+        buffer = lookupBuffer(kDemoSampleId);
     }
 
     if (!buffer || buffer->length <= 0 || buffer->interleaved.empty())
@@ -617,7 +676,7 @@ bool VoiceEngine::auditionZoneNow(int zoneIndex, int note, int velocity)
     if (map_ == nullptr || zoneIndex < 0 || static_cast<size_t>(zoneIndex) >= map_->zones.size() || pool_ == nullptr)
         return false;
     const Zone& zone = map_->zones[static_cast<size_t>(zoneIndex)];
-    auto buffer = pool_->getBuffer(zone.sampleId);
+    auto buffer = lookupBuffer(zone.sampleId);
     if (!buffer || buffer->length <= 0 || buffer->interleaved.empty())
         return false; // offline sample: stay silent
     const int idx = allocateVoice(note, kAuditionChannel);
@@ -706,82 +765,36 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
     const float baseCutoff = filterParams_.cutoffHz;
     const bool modulateCutoff = (envAmt != 0.0f) || (modCutoffOctaves_ != 0.0f);
 
+    // Sub-blocks keep stream progress fresh for the reader threads (and bound how far a voice
+    // reads ahead between publishes). Voices are independent per sample, so the mix is
+    // bit-identical to rendering the block in one pass.
+    for (int offset = 0; offset < numSamples; offset += kSubBlock)
+    {
+        const int n = std::min(kSubBlock, numSamples - offset);
+        for (auto& v : voices_)
+        {
+            if (!v.active || !v.buffer)
+                continue;
+            renderVoice(v, left + offset, right + offset, n, modulateCutoff, envAmt, baseCutoff);
+        }
+    }
+
+    int streamingVoices = 0;
     for (auto& v : voices_)
     {
-        if (!v.active || !v.buffer)
-            continue;
-
-        const auto& buf = *v.buffer;
-        const int64_t endFrame = v.zone.sampleEnd.has_value()
-                                     ? std::min(buf.length, *v.zone.sampleEnd)
-                                     : buf.length;
-        const float pan = std::clamp(v.zone.pan, -1.0f, 1.0f);
-        const float baseL = v.velocityAmp * masterGainLin_ * (0.5f * (1.0f - pan));
-        const float baseR = v.velocityAmp * masterGainLin_ * (0.5f * (1.0f + pan));
-
-        bool pastEnd = false;
-
-        for (int i = 0; i < numSamples; ++i)
+        if (!v.active)
         {
-            // Advance legato glide sample-by-sample toward targetPitchRatio
-            if (v.glideInc != 0.0 && v.pitchRatio != v.targetPitchRatio)
-            {
-                v.pitchRatio += v.glideInc;
-                if ((v.glideInc > 0.0 && v.pitchRatio >= v.targetPitchRatio)
-                    || (v.glideInc < 0.0 && v.pitchRatio <= v.targetPitchRatio))
-                {
-                    v.pitchRatio = v.targetPitchRatio;
-                    v.glideInc = 0.0;
-                }
-            }
-
-            float env = v.ampEnv.process();
-            if (!v.ampEnv.isActive())
-            {
-                v.active = false;
-                break;
-            }
-
-            if (v.readPos >= static_cast<double>(endFrame))
-            {
-                pastEnd = true;
-                // Keep rendering silence through release if needed
-                if (!v.releasing)
-                {
-                    v.ampEnv.noteOff();
-                    v.releasing = true;
-                    v.gated = false;
-                    v.pedalHeld = false;
-                    env = v.ampEnv.level();
-                }
-            }
-
-            float sL = 0.0f, sR = 0.0f;
-            if (!pastEnd && v.readPos < static_cast<double>(endFrame))
-            {
-                hermiteRead(buf.interleaved.data(), buf.channels, buf.length, v.readPos, sL, sR);
-
-                // Amp-env → filter: reuse amp ADSR to modulate cutoff in octaves
-                if (modulateCutoff)
-                {
-                    const float oct = envAmt * env + modCutoffOctaves_;
-                    const float cutoff = baseCutoff * std::exp2(oct);
-                    v.filter.setCutoffHz(cutoff);
-                }
-
-                v.filter.processStereo(sL, sR);
-            }
-
-            // Amp after filter (gain from same env); zone gain ramps after live edits
-            const float zg = v.zoneGain.next();
-            left[i] += sL * env * baseL * zg;
-            right[i] += sR * env * baseR * zg;
-            v.readPos += v.pitchRatio * v.fileToHostRatio;
+            endVoiceStream(v);
+            // Drop the finished voice's buffer reference (refcount decrement only: the pool keeps
+            // every buffer until its message-thread GC), so replaced audio can be freed promptly.
+            if (v.buffer)
+                v.buffer.reset();
+            continue;
         }
-
-        if (!v.ampEnv.isActive())
-            v.active = false;
+        if (v.streaming)
+            ++streamingVoices;
     }
+    streamingVoices_.store(streamingVoices, std::memory_order_relaxed);
 
     if (masterSoftClip_)
     {
@@ -791,6 +804,195 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
             right[i] = std::tanh(right[i]);
         }
     }
+}
+
+void VoiceEngine::renderVoice(Voice& v, float* left, float* right, int numSamples, bool modulateCutoff,
+                              float envAmt, float baseCutoff) noexcept
+{
+    const auto& buf = *v.buffer;
+    const int64_t endFrame = v.zone.sampleEnd.has_value()
+                                 ? std::min(buf.length, *v.zone.sampleEnd)
+                                 : buf.length;
+    const float pan = std::clamp(v.zone.pan, -1.0f, 1.0f);
+    const float baseL = v.velocityAmp * masterGainLin_ * (0.5f * (1.0f - pan));
+    const float baseR = v.velocityAmp * masterGainLin_ * (0.5f * (1.0f + pan));
+
+    if (v.streaming && v.streamSlot < 0 && streamer_ != nullptr
+        && v.readPos + 4096.0 >= static_cast<double>(v.residentFrames))
+    {
+        // Started while every slot was busy: try again before the preload runs out.
+        v.streamSlot = streamer_->acquire(v.buffer, static_cast<int64_t>(std::floor(v.readPos)) - 1);
+    }
+
+    bool pastEnd = false;
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        // Advance legato glide sample-by-sample toward targetPitchRatio
+        if (v.glideInc != 0.0 && v.pitchRatio != v.targetPitchRatio)
+        {
+            v.pitchRatio += v.glideInc;
+            if ((v.glideInc > 0.0 && v.pitchRatio >= v.targetPitchRatio)
+                || (v.glideInc < 0.0 && v.pitchRatio <= v.targetPitchRatio))
+            {
+                v.pitchRatio = v.targetPitchRatio;
+                v.glideInc = 0.0;
+            }
+        }
+
+        float env = v.ampEnv.process();
+        if (!v.ampEnv.isActive())
+        {
+            v.active = false;
+            break;
+        }
+
+        if (v.readPos >= static_cast<double>(endFrame))
+        {
+            pastEnd = true;
+            // Keep rendering silence through release if needed
+            if (!v.releasing)
+            {
+                v.ampEnv.noteOff();
+                v.releasing = true;
+                v.gated = false;
+                v.pedalHeld = false;
+                env = v.ampEnv.level();
+            }
+        }
+
+        float sL = 0.0f, sR = 0.0f;
+        if (!pastEnd && v.readPos < static_cast<double>(endFrame))
+        {
+            if (v.streaming)
+                readStreamed(v, sL, sR);
+            else
+                hermiteRead(buf.interleaved.data(), buf.channels, buf.length, v.readPos, sL, sR);
+
+            // Amp-env -> filter: reuse amp ADSR to modulate cutoff in octaves
+            if (modulateCutoff)
+            {
+                const float oct = envAmt * env + modCutoffOctaves_;
+                const float cutoff = baseCutoff * std::exp2(oct);
+                v.filter.setCutoffHz(cutoff);
+            }
+
+            v.filter.processStereo(sL, sR);
+        }
+
+        // Amp after filter (gain from same env); zone gain ramps after live edits
+        const float zg = v.zoneGain.next();
+        left[i] += sL * env * baseL * zg;
+        right[i] += sR * env * baseR * zg;
+        v.readPos += v.pitchRatio * v.fileToHostRatio;
+    }
+
+    if (!v.ampEnv.isActive())
+        v.active = false;
+
+    if (v.streamSlot >= 0 && streamer_ != nullptr)
+    {
+        if (!v.active)
+            endVoiceStream(v);
+        else
+            streamer_->publishProgress(v.streamSlot,
+                                       std::max<int64_t>(0, static_cast<int64_t>(std::floor(v.readPos)) - 1),
+                                       std::max(v.pitchRatio, v.targetPitchRatio) * v.fileToHostRatio);
+    }
+}
+
+namespace {
+/** Underrun fade length: ~1.5 ms at 44.1 kHz (64 samples). */
+constexpr float kStreamFadeStep = 1.0f / 64.0f;
+} // namespace
+
+void VoiceEngine::readStreamed(Voice& v, float& outL, float& outR) noexcept
+{
+    const SampleBuffer& buf = *v.buffer;
+    const double pos = v.readPos;
+    const int64_t i1 = static_cast<int64_t>(std::floor(pos));
+    const int64_t res = v.residentFrames;
+    float l = 0.0f, r = 0.0f;
+    bool ok = true;
+
+    if (i1 + 2 < res)
+    {
+        // Entirely inside the RAM preload: the exact same read as a fully loaded sample.
+        hermiteRead(buf.interleaved.data(), buf.channels, res, pos, l, r);
+    }
+    else
+    {
+        // Straddles the preload/stream boundary or is fully streamed: gather the 4 Hermite
+        // neighbours frame by frame (preload, ring, or zero past the end) and interpolate with
+        // the same arithmetic as hermiteStereo / hermiteMono, so the output is bit-identical.
+        const float t = static_cast<float>(pos - static_cast<double>(i1));
+        const int ch = buf.channels >= 2 ? 2 : 1;
+        float y[2][4] = { { 0.0f, 0.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f, 0.0f } };
+        for (int k = 0; k < 4 && ok; ++k)
+        {
+            const int64_t f = i1 - 1 + k;
+            if (f < 0 || f >= buf.length)
+                continue; // zero-padded edge
+            const float* src = nullptr;
+            if (f < res)
+                src = buf.interleaved.data() + f * ch;
+            else
+            {
+                if (!v.streamWin.contains(f) && v.streamSlot >= 0 && streamer_ != nullptr)
+                {
+                    v.streamWin = streamer_->window(v.streamSlot);
+                    if (!v.streamWin.contains(f) && nonRealtime_.load(std::memory_order_relaxed))
+                    {
+                        // Offline bounce: wait for the disk instead of dropping out.
+                        streamer_->fillBlocking(v.streamSlot, std::max<int64_t>(0, i1 - 1), i1 + 3);
+                        v.streamWin = streamer_->window(v.streamSlot);
+                    }
+                }
+                if (v.streamWin.contains(f))
+                    src = v.streamWin.frame(f);
+            }
+            if (src == nullptr)
+            {
+                ok = false;
+                break;
+            }
+            y[0][k] = src[0];
+            y[1][k] = ch >= 2 ? src[1] : src[0];
+        }
+        if (ok)
+        {
+            l = hermite4(y[0][0], y[0][1], y[0][2], y[0][3], t);
+            r = ch >= 2 ? hermite4(y[1][0], y[1][1], y[1][2], y[1][3], t) : l;
+        }
+    }
+
+    if (ok)
+    {
+        v.holdL = l;
+        v.holdR = r;
+        v.starved = false;
+        if (v.streamGain < 1.0f)
+        {
+            // Recovering from an underrun: fade back in.
+            v.streamGain = std::min(1.0f, v.streamGain + kStreamFadeStep);
+            l *= v.streamGain;
+            r *= v.streamGain;
+        }
+    }
+    else
+    {
+        if (!v.starved)
+        {
+            v.starved = true;
+            underruns_.fetch_add(1, std::memory_order_relaxed);
+        }
+        // Fade the last good frame out instead of jumping to silence (no click).
+        v.streamGain = std::max(0.0f, v.streamGain - kStreamFadeStep);
+        l = v.holdL * v.streamGain;
+        r = v.holdR * v.streamGain;
+    }
+    outL = l;
+    outR = r;
 }
 
 int VoiceEngine::activeVoiceCount() const
