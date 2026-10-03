@@ -613,7 +613,7 @@ void ZoneEditorPanel::resized()
     const int colW = (r.getWidth() - 2 * colGap) / 3;
     for (int row = 0; row < 3; ++row)
     {
-        auto line = r.removeFromTop (38);
+        auto line = r.removeFromTop (37);
         for (int col = 0; col < 3; ++col)
         {
             auto& f = *fields_[(size_t) (row * 3 + col)];
@@ -633,7 +633,7 @@ void ZoneEditorPanel::resized()
     buttons.removeFromLeft (8);
     auditionBtn_.setBounds (buttons.removeFromLeft (90));
 
-    r.removeFromTop (6);
+    r.removeFromTop (4);
     auto shiftRow = r.removeFromTop (24);
     shiftCaption_.setBounds (shiftRow.removeFromLeft (74));
     for (auto& b : shiftBtns_)

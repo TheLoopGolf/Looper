@@ -17,10 +17,23 @@ void SegmentedChoice::attachToParameter (juce::RangedAudioParameter& param)
     attachment_ = std::make_unique<juce::ParameterAttachment> (
         param,
         [this] (float denormalised) {
-            setSelectedIndex (juce::roundToInt (denormalised), juce::dontSendNotification);
+            setSelectedIndex (segmentForValue (juce::roundToInt (denormalised)), juce::dontSendNotification);
         },
         nullptr);
     attachment_->sendInitialUpdate();
+}
+
+int SegmentedChoice::valueForSegment (int segment) const
+{
+    return juce::isPositiveAndBelow (segment, segmentValues_.size()) ? segmentValues_[segment] : segment;
+}
+
+int SegmentedChoice::segmentForValue (int value) const
+{
+    if (segmentValues_.isEmpty())
+        return value;
+    const int seg = segmentValues_.indexOf (value);
+    return seg >= 0 ? seg : 0;
 }
 
 void SegmentedChoice::setSelectedIndex (int index, juce::NotificationType notify)
@@ -50,7 +63,7 @@ void SegmentedChoice::userSelect (int index)
     index = juce::jlimit (0, options_.size() - 1, index);
     const int before = selected_;
     if (attachment_ != nullptr)
-        attachment_->setValueAsCompleteGesture ((float) index); // may also update selected_
+        attachment_->setValueAsCompleteGesture ((float) valueForSegment (index)); // may also update selected_
     setSelectedIndex (index, juce::dontSendNotification);
     if (before != selected_ && onChange)
         onChange (selected_);

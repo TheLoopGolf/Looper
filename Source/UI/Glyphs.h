@@ -25,6 +25,7 @@ inline juce::String enDash()     { return utf8 ("\xe2\x80\x93"); } // U+2013
 inline juce::String plusMinus()  { return utf8 ("\xc2\xb1"); }     // U+00B1
 inline juce::String arrowRight() { return utf8 ("\xe2\x86\x92"); } // U+2192
 inline juce::String arrowLeft()  { return utf8 ("\xe2\x86\x90"); } // U+2190
+inline juce::String minus()      { return utf8 ("\xe2\x88\x92"); } // U+2212 minus sign
 
 /** "a b" joined with " <sep> " where sep is a glyph, e.g. join (x, emDash(), y). */
 inline juce::String spaced (const juce::String& a, const juce::String& sep, const juce::String& b)

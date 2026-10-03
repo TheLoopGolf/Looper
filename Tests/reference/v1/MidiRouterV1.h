@@ -1,16 +1,20 @@
 #pragma once
+// FROZEN REFERENCE - do not edit. Verbatim copy of Source/MidiRouter/MidiRouter.h at commit 3eb8926 (pre sound-shaping),
+// renamed into namespace looper_v1. SoundShapingTests renders old patches through this engine and
+// through the current one and requires bit-identical output (backward compatibility).
 
-#include "../InstrumentMap/InstrumentMap.h"
-#include "../VoiceEngine/VoiceEngine.h"
+#include "InstrumentMap/InstrumentMap.h"
+#include "VoiceEngineV1.h"
 
 #include <algorithm>
-#include <functional>
 
-namespace looper {
+namespace looper {}
+namespace looper_v1 {
+using namespace looper;
 
 /**
  * MIDI → voice engine router.
- * Pitch bend: 14-bit, center 8192; separate up / down ranges in semitones (default 2 / 2).
+ * Pitch bend: ±2 semitones (14-bit, center 8192).
  * CC1 mod wheel → FilterCutoff (octaves offset) when target is FilterCutoff.
  * CC64 sustain: value >= 64 = on; VoiceEngine defers noteOff until pedal up.
  */
@@ -43,9 +47,9 @@ public:
     {
         if (!engine_)
             return;
-        // 0..16383, center 8192 -> +bendUpSemis_ / -bendDownSemis_
-        bendNorm_ = (static_cast<float>(value14) - 8192.0f) / 8192.0f;
-        applyBend();
+        // 0..16383, center 8192 → ±bendRangeSemis_
+        const float norm = (static_cast<float>(value14) - 8192.0f) / 8192.0f;
+        engine_->setPitchBendSemis(norm * bendRangeSemis_);
     }
 
     void handleCc(int cc, int value, int /*channel*/)
@@ -64,32 +68,9 @@ public:
         }
     }
 
-    /** Same range up and down (v1 API). */
-    void setBendRangeSemis(float semis) { setBendRange(semis, semis); }
-
-    /** Up / down ranges in semitones (>= 0). A held bend follows a range change immediately. */
-    void setBendRange(float upSemis, float downSemis)
-    {
-        upSemis = std::max(0.0f, upSemis);
-        downSemis = std::max(0.0f, downSemis);
-        const std::equal_to<float> same; // exact on purpose (no -Wfloat-equal)
-        if (same(upSemis, bendUpSemis_) && same(downSemis, bendDownSemis_))
-            return;
-        bendUpSemis_ = upSemis;
-        bendDownSemis_ = downSemis;
-        if (!same(bendNorm_, 0.0f))
-            applyBend();
-    }
-    float bendUpSemis() const { return bendUpSemis_; }
-    float bendDownSemis() const { return bendDownSemis_; }
+    void setBendRangeSemis(float semis) { bendRangeSemis_ = semis; }
 
 private:
-    void applyBend()
-    {
-        if (engine_)
-            engine_->setPitchBendSemis(bendNorm_ * (bendNorm_ >= 0.0f ? bendUpSemis_ : bendDownSemis_));
-    }
-
     void applyModWheel()
     {
         if (!engine_)
@@ -101,11 +82,9 @@ private:
     }
 
     VoiceEngine* engine_ = nullptr;
-    float bendUpSemis_ = 2.0f;
-    float bendDownSemis_ = 2.0f;
-    float bendNorm_ = 0.0f;   // last bend, -1..+1 (approx.)
+    float bendRangeSemis_ = 2.0f;
     ModWheelTarget modTarget_ = ModWheelTarget::FilterCutoff;
     float modWheel_ = 0.0f;
 };
 
-} // namespace looper
+} // namespace looper_v1

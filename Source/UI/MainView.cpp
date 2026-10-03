@@ -113,37 +113,85 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor), z
     ampTitle_.setColour (juce::Label::textColourId, Palette::muted());
     addAndMakeVisible (ampTitle_);
 
+    for (auto* t : { &filterTitle_, &velTitle_, &fenvTitle_, &bendTitle_ })
+    {
+        t->setFont (juce::Font (juce::FontOptions (11.0f)));
+        t->setColour (juce::Label::textColourId, Palette::muted());
+        addAndMakeVisible (*t);
+    }
     filterTitle_.setText ("FILTER", juce::dontSendNotification);
-    filterTitle_.setFont (juce::Font (juce::FontOptions (11.0f)));
-    filterTitle_.setColour (juce::Label::textColourId, Palette::muted());
-    addAndMakeVisible (filterTitle_);
+    velTitle_.setText ("VELOCITY", juce::dontSendNotification);
+    fenvTitle_.setText ("FILTER ENV", juce::dontSendNotification);
+    bendTitle_.setText ("BEND", juce::dontSendNotification);
 
+    const auto pm = glyph::plusMinus();
     styleKnob (vol_, volL_, "VOL");
     styleKnob (atk_, atkL_, "ATK");
     styleKnob (dec_, decL_, "DEC");
     styleKnob (sus_, susL_, "SUS");
     styleKnob (rel_, relL_, "REL");
-    styleKnob (cut_, cutL_, "CUT");
-    styleKnob (res_, resL_, "RES");
-    styleKnob (env_, envL_, "ENV");
+    styleKnob (cut_, cutL_, "CUT", "Filter cutoff (Hz). Changes glide over 20 ms while notes sound.");
+    styleKnob (res_, resL_, "RES", "Filter resonance");
+    styleKnob (key_, keyL_, "KEY",
+               "Key tracking: the cutoff follows the note you play. 100% = one octave per octave; "
+               "C4 (MIDI 60) is the pivot and sounds at the CUT value.");
+    styleKnob (velAmp_, velAmpL_, "AMP",
+               "Velocity to loudness. 100% = full velocity range (classic), 0% = every note at full level.",
+               false, true);
+    styleKnob (velCut_, velCutL_, "CUT",
+               "Velocity to cutoff (semitones). Full velocity plays the CUT value; softer notes move the "
+               "cutoff down by up to this amount (negative: softer notes are brighter).",
+               true, true);
+    styleKnob (velAtk_, velAtkL_, "ATK",
+               "Velocity to attack time: harder = faster. Full velocity uses the amp ATK value; softer notes "
+               "attack up to 16x slower at 100%.",
+               false, true);
+    styleKnob (fAtk_, fAtkL_, "ATK", "Filter envelope attack", false, true);
+    styleKnob (fDec_, fDecL_, "DEC", "Filter envelope decay", false, true);
+    styleKnob (fSus_, fSusL_, "SUS", "Filter envelope sustain level", false, true);
+    styleKnob (fRel_, fRelL_, "REL", "Filter envelope release", false, true);
+    styleKnob (fAmt_, fAmtL_, "AMT",
+               "Filter envelope depth in semitones (" + pm + "60 = " + pm + "5 octaves at the envelope peak).",
+               true, true);
+    styleKnob (bendUp_, bendUpL_, "UP", "Pitch-bend range up (semitones)");
+    styleKnob (bendDown_, bendDownL_, "DOWN", "Pitch-bend range down (semitones)");
 
     auto& ap = processor_.apvts();
-    volA_ = std::make_unique<SliderAtt> (ap, "volume", vol_);
-    atkA_ = std::make_unique<SliderAtt> (ap, "attack", atk_);
-    decA_ = std::make_unique<SliderAtt> (ap, "decay", dec_);
-    susA_ = std::make_unique<SliderAtt> (ap, "sustain", sus_);
-    relA_ = std::make_unique<SliderAtt> (ap, "release", rel_);
-    cutA_ = std::make_unique<SliderAtt> (ap, "cutoff", cut_);
-    resA_ = std::make_unique<SliderAtt> (ap, "resonance", res_);
-    envA_ = std::make_unique<SliderAtt> (ap, "filterEnvAmt", env_);
+    const std::pair<juce::Slider*, const char*> bindings[] = {
+        { &vol_, "volume" }, { &atk_, "attack" }, { &dec_, "decay" }, { &sus_, "sustain" }, { &rel_, "release" },
+        { &cut_, "cutoff" }, { &res_, "resonance" }, { &key_, "keyTrack" },
+        { &velAmp_, "velAmp" }, { &velCut_, "velCutoff" }, { &velAtk_, "velAttack" },
+        { &fAtk_, "fenvAttack" }, { &fDec_, "fenvDecay" }, { &fSus_, "fenvSustain" }, { &fRel_, "fenvRelease" },
+        { &fAmt_, "fenvAmount" }, { &bendUp_, "bendUp" }, { &bendDown_, "bendDown" },
+    };
+    for (const auto& [slider, id] : bindings)
+        knobAttachments_.push_back (std::make_unique<SliderAtt> (ap, id, *slider));
+    // Double-click resets to the parameter default
+    for (const auto& [slider, id] : bindings)
+        if (auto* param = ap.getParameter (id))
+            slider->setDoubleClickReturnValue (true, param->convertFrom0to1 (param->getDefaultValue()));
 
-    filterLabel_.setText ("MODE", juce::dontSendNotification);
-    filterLabel_.setColour (juce::Label::textColourId, Palette::muted());
-    filterLabel_.setFont (juce::Font (juce::FontOptions (10.0f)));
-    addAndMakeVisible (filterLabel_);
-    filterBox_.addItemList ({ "LP", "HP", "BP" }, 1);
-    addAndMakeVisible (filterBox_);
-    filterA_ = std::make_unique<ComboAtt> (ap, "filterType", filterBox_);
+    filterTypeL_.setText ("TYPE", juce::dontSendNotification);
+    filterTypeL_.setJustificationType (juce::Justification::centred);
+    filterTypeL_.setFont (juce::Font (juce::FontOptions (10.0f)));
+    filterTypeL_.setColour (juce::Label::textColourId, Palette::muted());
+    addAndMakeVisible (filterTypeL_);
+    filterType_.setSegmentValues ({ 0, 3, 2, 1 });   // LP12, LP24, BP, HP -> choice indices
+    if (auto* ft = ap.getParameter ("filterType"))
+        filterType_.attachToParameter (*ft);
+    filterType_.setTitle ("Filter type");
+    filterType_.setTooltip ("Filter type: low-pass 12 dB/oct, low-pass 24 dB/oct, band-pass, high-pass");
+    addAndMakeVisible (filterType_);
+
+    legacyEnvChip_.setColour (juce::TextButton::buttonColourId, juce::Colour (0xff3a3212));
+    legacyEnvChip_.setColour (juce::TextButton::textColourOffId, Palette::sand());
+    legacyEnvChip_.onClick = [this] {
+        processor_.convertLegacyFilterEnv();
+        updateLegacyEnvChip();
+        updateStatus();
+    };
+    addChildComponent (legacyEnvChip_);
+    updateLegacyEnvChip();
 
     refreshFromProcessor();
 }
@@ -167,11 +215,64 @@ void MainView::styleBrassButton (juce::TextButton& b)
     b.setColour (juce::TextButton::textColourOffId, Palette::text());
 }
 
-void MainView::styleKnob (juce::Slider& s, juce::Label& label, const juce::String& name)
+void MainView::updateLegacyEnvChip()
+{
+    float amt = 0.0f, fenv = 0.0f;
+    if (auto* raw = processor_.apvts().getRawParameterValue ("filterEnvAmt"))
+        amt = raw->load();
+    if (auto* raw = processor_.apvts().getRawParameterValue ("fenvAmount"))
+        fenv = raw->load();
+    const bool show = ! juce::exactlyEqual (amt, 0.0f);
+    const bool fenvUnused = juce::exactlyEqual (fenv, 0.0f);
+    if (show)
+    {
+        const auto text = glyph::spaced ("Amp env " + glyph::arrowRight() + " cutoff "
+                                             + (amt > 0.0f ? "+" : "") + juce::String (amt, 2) + " oct",
+                                         glyph::middleDot(), fenvUnused ? "Move to filter env" : "Remove");
+        if (text != legacyEnvChip_.getButtonText())
+            legacyEnvChip_.setButtonText (text);
+        legacyEnvChip_.setTooltip (fenvUnused
+            ? "This patch was made before the filter envelope existed: the amp envelope moves the cutoff. "
+              "Click to copy that onto FILTER ENV (same sound) and switch the old modulation off."
+            : "This patch also uses the old amp-envelope cutoff modulation. Click to switch it off "
+              "(the FILTER ENV settings stay).");
+    }
+    if (show != legacyEnvChip_.isVisible() || ! juce::exactlyEqual (amt, legacyEnvShown_))
+    {
+        legacyEnvShown_ = amt;
+        legacyEnvChip_.setVisible (show);
+        resized();
+    }
+}
+
+MainView::PerfLayout MainView::perfLayout() const
+{
+    PerfLayout l;
+    l.card = getLocalBounds().reduced (16).removeFromBottom (kPerfH);
+    auto inner = l.card.reduced (10, 6);
+    const int rowH = (inner.getHeight() - 4) / 2;
+    for (int row = 0; row < 2; ++row)
+    {
+        auto band = inner.removeFromTop (rowH);
+        if (row == 0)
+            inner.removeFromTop (4);
+        l.rowTitle[row] = band.removeFromTop (16);
+        l.rowCells[row] = band;
+    }
+    l.cellW = inner.getWidth() / 10;
+    return l;
+}
+
+void MainView::styleKnob (juce::Slider& s, juce::Label& label, const juce::String& name,
+                          const juce::String& tooltip, bool bipolar, bool brass)
 {
     s.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 56, 16);
-    s.setColour (juce::Slider::rotarySliderFillColourId, Palette::fairway());
+    s.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 68, 15);
+    s.setColour (juce::Slider::rotarySliderFillColourId, brass ? Palette::brass() : Palette::fairway());
+    if (bipolar)
+        s.getProperties().set ("bipolar", true);
+    if (tooltip.isNotEmpty())
+        s.setTooltip (tooltip);
     s.setColour (juce::Slider::rotarySliderOutlineColourId, Palette::border());
     s.setColour (juce::Slider::textBoxTextColourId, Palette::text());
     s.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
@@ -180,6 +281,7 @@ void MainView::styleKnob (juce::Slider& s, juce::Label& label, const juce::Strin
     label.setJustificationType (juce::Justification::centred);
     label.setFont (juce::Font (juce::FontOptions (10.0f)));
     label.setColour (juce::Label::textColourId, Palette::muted());
+    label.setInterceptsMouseClicks (false, false);
     addAndMakeVisible (label);
 }
 
@@ -619,7 +721,7 @@ void MainView::paint (juce::Graphics& g)
 
     area.removeFromTop (8);
 
-    const int perfH = 168;
+    const int perfH = kPerfH;
     auto mid = area;
     mid.removeFromBottom (perfH + 8);
 
@@ -687,17 +789,30 @@ void MainView::paint (juce::Graphics& g)
         }
     }
 
-    // Performance deck card
-    auto perf = getLocalBounds().reduced (16).removeFromBottom (perfH).toFloat();
+    // Sound deck card: AMP | FILTER over VELOCITY | FILTER ENV | BEND
+    const auto pl = perfLayout();
+    const auto perf = pl.card.toFloat();
     g.setColour (Palette::bgRaised());
     g.fillRoundedRectangle (perf, 12.0f);
     g.setColour (Palette::border());
     g.drawRoundedRectangle (perf, 12.0f, 1.0f);
 
-    // Thin divider between AMP and FILTER groups (after 5 knobs / before filter)
-    const float divX = perf.getX() + perf.getWidth() * (5.0f / 8.0f);
+    // Hairline between the rows (brass tick at the left, like a yardage marker)
+    const float rowSplit = (float) pl.rowTitle[1].getY() - 3.0f;
     g.setColour (Palette::border());
-    g.drawLine (divX, perf.getY() + 28.0f, divX, perf.getBottom() - 12.0f, 1.0f);
+    g.drawLine (perf.getX() + 12.0f, rowSplit, perf.getRight() - 12.0f, rowSplit, 1.0f);
+    g.setColour (Palette::brass().withAlpha (0.6f));
+    g.fillRect (perf.getX() + 12.0f, rowSplit - 0.5f, 28.0f, 1.0f);
+
+    // Section dividers: row 1 after AMP (5 cells); row 2 after VELOCITY (3) and FILTER ENV (8)
+    auto divider = [&] (int row, int afterCells) {
+        const float x = (float) pl.rowCells[row].getX() + (float) (afterCells * pl.cellW);
+        g.drawLine (x, (float) pl.rowTitle[row].getY() + 2.0f, x, (float) pl.rowCells[row].getBottom() - 4.0f, 1.0f);
+    };
+    g.setColour (Palette::border());
+    divider (0, 5);
+    divider (1, 3);
+    divider (1, 8);
 }
 
 void MainView::resized()
@@ -720,25 +835,51 @@ void MainView::resized()
     else
         memoryChip_.setBounds ({});
 
-    const int perfH = 168;
-    auto perf = getLocalBounds().reduced (16).removeFromBottom (perfH).reduced (10, 8);
-    auto titleRow = perf.removeFromTop (18);
-    ampTitle_.setBounds (titleRow.removeFromLeft (titleRow.getWidth() * 5 / 8));
-    filterTitle_.setBounds (titleRow);
-
-    auto modeRow = perf.removeFromTop (22);
-    modeRow.removeFromLeft (modeRow.getWidth() * 5 / 8);
-    filterLabel_.setBounds (modeRow.removeFromLeft (44));
-    filterBox_.setBounds (modeRow.removeFromLeft (72).reduced (0, 1));
-
-    juce::Slider* knobs[] = { &vol_, &atk_, &dec_, &sus_, &rel_, &cut_, &res_, &env_ };
-    juce::Label* labels[] = { &volL_, &atkL_, &decL_, &susL_, &relL_, &cutL_, &resL_, &envL_ };
-    const int kw = perf.getWidth() / 8;
-    for (int i = 0; i < 8; ++i)
+    const int perfH = kPerfH;
     {
-        auto cell = perf.withX (perf.getX() + i * kw).withWidth (kw).reduced (4);
-        labels[i]->setBounds (cell.removeFromTop (14));
-        knobs[i]->setBounds (cell);
+        const auto pl = perfLayout();
+        auto title = [&] (juce::Label& lbl, int row, int cell, int span) {
+            const auto& t = pl.rowTitle[row];
+            lbl.setBounds (t.getX() + cell * pl.cellW + 6, t.getY(), span * pl.cellW - 12, t.getHeight());
+        };
+        title (ampTitle_, 0, 0, 5);
+        title (filterTitle_, 0, 5, 2);
+        title (velTitle_, 1, 0, 3);
+        title (fenvTitle_, 1, 3, 5);
+        title (bendTitle_, 1, 8, 2);
+        if (legacyEnvChip_.isVisible())
+        {
+            const auto& t = pl.rowTitle[0];
+            const int w = juce::jmin (3 * pl.cellW + 40,
+                                      legacyEnvChip_.getBestWidthForHeight (15) + 24);
+            // Inside the caption strip only, so it never touches the knob labels below.
+            legacyEnvChip_.setBounds (t.getRight() - w, t.getY(), w, t.getHeight() - 2);
+        }
+        else
+            legacyEnvChip_.setBounds ({});
+
+        auto place = [&] (juce::Slider& s, juce::Label& lbl, int row, int index) {
+            auto cell = pl.cell (row, index).reduced (3, 0);
+            lbl.setBounds (cell.removeFromTop (12));
+            s.setBounds (cell);
+        };
+        juce::Slider* row0[] = { &vol_, &atk_, &dec_, &sus_, &rel_ };
+        juce::Label* row0L[] = { &volL_, &atkL_, &decL_, &susL_, &relL_ };
+        for (int i = 0; i < 5; ++i)
+            place (*row0[i], *row0L[i], 0, i);
+        {
+            auto typeCell = pl.cell (0, 5, 2).reduced (10, 0);
+            filterTypeL_.setBounds (typeCell.removeFromTop (12));
+            filterType_.setBounds (typeCell.withSizeKeepingCentre (typeCell.getWidth(), 24).translated (0, -6));
+        }
+        place (cut_, cutL_, 0, 7);
+        place (res_, resL_, 0, 8);
+        place (key_, keyL_, 0, 9);
+
+        juce::Slider* row1[] = { &velAmp_, &velCut_, &velAtk_, &fAtk_, &fDec_, &fSus_, &fRel_, &fAmt_, &bendUp_, &bendDown_ };
+        juce::Label* row1L[] = { &velAmpL_, &velCutL_, &velAtkL_, &fAtkL_, &fDecL_, &fSusL_, &fRelL_, &fAmtL_, &bendUpL_, &bendDownL_ };
+        for (int i = 0; i < 10; ++i)
+            place (*row1[i], *row1L[i], 1, i);
     }
 
     auto mid = getLocalBounds().reduced (16);

@@ -1,29 +1,26 @@
 #pragma once
+// FROZEN REFERENCE - do not edit. Verbatim copy of Source/Filter/SvfFilter.h at commit 3eb8926 (pre sound-shaping),
+// renamed into namespace looper_v1. SoundShapingTests renders old patches through this engine and
+// through the current one and requires bit-identical output (backward compatibility).
 
 #include <algorithm>
 #include <cmath>
 
-namespace looper {
+namespace looper {}
+namespace looper_v1 {
+using namespace looper;
 
-/**
- * Filter response. Values are the APVTS "filterType" choice indices (0..3) and must stay in
- * this order: 0..2 are the v1 types (patches and host sessions store the index), LowPass24 was
- * appended in the sound-shaping release.
- */
 enum class FilterType
 {
-    LowPass,    // 12 dB/oct (one SVF stage)
-    HighPass,   // 12 dB/oct
-    BandPass,   // 6 dB/oct skirts, peak gain = Q at the cutoff (v1 response)
-    LowPass24   // 24 dB/oct: resonant stage + Butterworth (Q = 0.707) stage, same cutoff
+    LowPass,
+    HighPass,
+    BandPass
 };
 
 /**
  * Linear SVF (Andy Simper / Chamberlin-style trapezoidal).
  * Shared coefficients; dual state for independent L/R processing.
  * Resonance 0..1 maps to Q ≈ 0.5..~8.5 with a soft high-end limit.
- * LowPass24 cascades a second, non-resonant stage (its own L/R state) after the first; the
- * 12 dB types run exactly the v1 code path (bit-identical output).
  */
 class SvfFilter
 {
@@ -34,14 +31,7 @@ public:
         dirty_ = true;
     }
 
-    void setType(FilterType t)
-    {
-        if (t == type_)
-            return;
-        if (t == FilterType::LowPass24)
-            ic3eqL_ = ic4eqL_ = ic3eqR_ = ic4eqR_ = 0.0f; // second stage starts clean
-        type_ = t;
-    }
+    void setType(FilterType t) { type_ = t; }
 
     void setCutoffHz(float hz)
     {
@@ -60,12 +50,7 @@ public:
     {
         ic1eqL_ = ic2eqL_ = 0.0f;
         ic1eqR_ = ic2eqR_ = 0.0f;
-        ic3eqL_ = ic4eqL_ = 0.0f;
-        ic3eqR_ = ic4eqR_ = 0.0f;
     }
-
-    /** Fixed damping of the LowPass24 second stage: k = 1/Q with Q = 1/sqrt(2) (Butterworth). */
-    static constexpr float kStage2K = 1.41421356237f;
 
     /** Map resonance 0..1 → Q with soft limit to avoid blow-ups. */
     static float resonanceToQ(float r01)
@@ -80,8 +65,6 @@ public:
         updateCoeffs();
         float lp = 0, bp = 0, hp = 0;
         tick(x, ic1eqL_, ic2eqL_, lp, bp, hp);
-        if (type_ == FilterType::LowPass24)
-            return tickLp2(lp, ic3eqL_, ic4eqL_);
         return select(lp, bp, hp);
     }
 
@@ -92,21 +75,8 @@ public:
         float lpR = 0, bpR = 0, hpR = 0;
         tick(left, ic1eqL_, ic2eqL_, lpL, bpL, hpL);
         tick(right, ic1eqR_, ic2eqR_, lpR, bpR, hpR);
-        if (type_ == FilterType::LowPass24)
-        {
-            left = tickLp2(lpL, ic3eqL_, ic4eqL_);
-            right = tickLp2(lpR, ic3eqR_, ic4eqR_);
-            return;
-        }
         left = select(lpL, bpL, hpL);
         right = select(lpR, bpR, hpR);
-    }
-
-    /** True while every state variable is finite (stability checks in tests). */
-    bool isFinite() const
-    {
-        return std::isfinite(ic1eqL_) && std::isfinite(ic2eqL_) && std::isfinite(ic1eqR_) && std::isfinite(ic2eqR_)
-            && std::isfinite(ic3eqL_) && std::isfinite(ic4eqL_) && std::isfinite(ic3eqR_) && std::isfinite(ic4eqR_);
     }
 
     FilterType type() const { return type_; }
@@ -132,26 +102,6 @@ private:
         a2_ = g * a1_;
         a3_ = g * a2_;
         k_ = k;
-
-        // LowPass24 second stage: same g, fixed Butterworth damping
-        b1_ = 1.0f / (1.0f + g * (g + kStage2K));
-        b2_ = g * b1_;
-        b3_ = g * b2_;
-    }
-
-    /** Second (non-resonant) low-pass stage of LowPass24. */
-    float tickLp2(float v0, float& ic1eq, float& ic2eq) const
-    {
-        const float v3 = v0 - ic2eq;
-        const float v1 = b1_ * ic1eq + b2_ * v3;
-        const float v2 = ic2eq + b2_ * ic1eq + b3_ * v3;
-        ic1eq = 2.0f * v1 - ic1eq;
-        ic2eq = 2.0f * v2 - ic2eq;
-        if (ic1eq > -1.0e-15f && ic1eq < 1.0e-15f)
-            ic1eq = 0.0f;
-        if (ic2eq > -1.0e-15f && ic2eq < 1.0e-15f)
-            ic2eq = 0.0f;
-        return v2;
     }
 
     void tick(float v0, float& ic1eq, float& ic2eq, float& lp, float& bp, float& hp) const
@@ -180,7 +130,6 @@ private:
             case FilterType::LowPass: return lp;
             case FilterType::HighPass: return hp;
             case FilterType::BandPass: return bp;
-            case FilterType::LowPass24: return lp; // handled by tickLp2 in process*
         }
         return lp;
     }
@@ -194,9 +143,6 @@ private:
     float a1_ = 0.0f, a2_ = 0.0f, a3_ = 0.0f, k_ = 0.0f;
     float ic1eqL_ = 0.0f, ic2eqL_ = 0.0f;
     float ic1eqR_ = 0.0f, ic2eqR_ = 0.0f;
-    float b1_ = 0.0f, b2_ = 0.0f, b3_ = 0.0f;   // LowPass24 stage 2
-    float ic3eqL_ = 0.0f, ic4eqL_ = 0.0f;
-    float ic3eqR_ = 0.0f, ic4eqR_ = 0.0f;
 };
 
-} // namespace looper
+} // namespace looper_v1

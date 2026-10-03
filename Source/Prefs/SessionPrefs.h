@@ -19,7 +19,7 @@ struct SessionPrefs
     int polyphony = 64;                 // 1..128
     float glideMs = 0.0f;               // 0 = off; stored on map; VoiceEngine legato portamento
     bool masterSoftClip = false;        // applied at voice-sum output when true
-    int defaultFilterType = 0;          // 0=LP, 1=HP, 2=BP → APVTS filterType
+    int defaultFilterType = 0;          // APVTS filterType index: 0=LP12, 1=HP, 2=BP, 3=LP24
 
     // --- Mapping (next AutoMapper import + map display defaults) ---
     bool middleCIsC4 = true;            // C4=60 default; false = C3=60 (filename parse + note labels)
@@ -42,6 +42,8 @@ struct SessionPrefs
     static constexpr int kMaxPreloadFrames = 1048576;
 
     // --- MIDI ---
+    /** v1 bend range (the UI always stored 2). Bend is per patch now (bendUp / bendDown
+        parameters); this only seeds them for sessions saved before those existed. */
     float pitchBendRangeSemis = 2.0f;
     ModWheelTarget modWheelTarget = ModWheelTarget::FilterCutoff;
 

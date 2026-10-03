@@ -1,11 +1,16 @@
-#include "VoiceEngine.h"
-#include "Hermite.h"
+// FROZEN REFERENCE - do not edit. Verbatim copy of Source/VoiceEngine/VoiceEngine.cpp at commit 3eb8926 (pre sound-shaping),
+// renamed into namespace looper_v1. SoundShapingTests renders old patches through this engine and
+// through the current one and requires bit-identical output (backward compatibility).
+#include "VoiceEngineV1.h"
+#include "VoiceEngine/Hermite.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
 
-namespace looper {
+namespace looper {}
+namespace looper_v1 {
+using namespace looper;
 
 namespace {
 
@@ -77,7 +82,6 @@ void VoiceEngine::setSampleRate(double sr)
     for (auto& v : voices_)
     {
         v.ampEnv.setSampleRate(sampleRate_);
-        v.filterEnv.setSampleRate(sampleRate_);
         v.filter.setSampleRate(sampleRate_);
     }
 }
@@ -92,8 +96,6 @@ void VoiceEngine::setPolyphony(int n)
     {
         v.ampEnv.setSampleRate(sampleRate_);
         v.ampEnv.setParams(envParams_);
-        v.filterEnv.setSampleRate(sampleRate_);
-        v.filterEnv.setParams(fenvParams_);
         v.filter.setSampleRate(sampleRate_);
         applyFilterGlobals(v);
     }
@@ -106,105 +108,11 @@ void VoiceEngine::setEnvParams(const AmpEnv::Params& p)
         v.ampEnv.setParams(envParams_);
 }
 
-void VoiceEngine::setFilterEnvParams(const AmpEnv::Params& p)
-{
-    fenvParams_ = p;
-    for (auto& v : voices_)
-        v.filterEnv.setParams(fenvParams_);
-}
-
 void VoiceEngine::setFilterParams(const FilterParams& p)
 {
     filterParams_ = p;
-
-    // Glide continuous values while notes sound; jump when silent (or on the first call), so a
-    // patch / session load never sweeps from the previous settings.
-    bool anyActive = false;
-    for (const auto& v : voices_)
-        anyActive = anyActive || v.active;
-    const int n = (filterRampsPrimed_ && anyActive) ? ParamRamp::samplesFor(sampleRate_) : 0;
-    filterRampsPrimed_ = true;
-    auto to = [n](ParamRamp& r, float value) {
-        if (!std::isfinite(value))
-            value = 0.0f;
-        if (n <= 0)
-            r.snap(value);
-        else
-            r.setTarget(value, n);
-    };
-    to(cutoffRamp_, std::log2(std::clamp(p.cutoffHz, 1.0f, 1.0e6f)));
-    to(resRamp_, std::clamp(p.resonance, 0.0f, 1.0f));
-    to(fenvRamp_, p.fenvAmountSemis / 12.0f);
-    to(keyRamp_, p.keyTrack);
-    to(velCutRamp_, p.velToCutoffSemis / 12.0f);
-
     for (auto& v : voices_)
         applyFilterGlobals(v);
-}
-
-float VoiceEngine::curvedVelocity(int velocity) const noexcept
-{
-    float velLin = std::clamp(velocity, 1, 127) / 127.0f;
-    if (map_ != nullptr)
-    {
-        switch (map_->velCurve)
-        {
-            case VelCurve::Soft: velLin = std::sqrt(velLin); break;
-            case VelCurve::Hard: velLin = velLin * velLin; break;
-            default: break;
-        }
-    }
-    return velLin;
-}
-
-float VoiceEngine::velocityGain(int velocity) const noexcept
-{
-    const float velLin = curvedVelocity(velocity);
-    const float amt = velParams_.toAmp;
-    if (amt >= 1.0f)
-        return velLin; // v1: full velocity sensitivity (exact)
-    if (amt <= 0.0f)
-        return 1.0f;
-    return 1.0f - amt * (1.0f - velLin);
-}
-
-float VoiceEngine::velocityAttackMs(int velocity) const noexcept
-{
-    const float amt = std::clamp(velParams_.toAttack, 0.0f, 1.0f);
-    if (amt <= 0.0f)
-        return envParams_.attackMs; // v1 (exact)
-    const float soft = 1.0f - curvedVelocity(velocity); // 0 at velocity 127
-    return envParams_.attackMs * std::exp2(VelocityParams::kAttackOctaves * amt * soft);
-}
-
-const VoiceEngine::FilterMod* VoiceEngine::prepareFilterMod(int n) noexcept
-{
-    const bool newTerms = !fenvRamp_.isZero() || !keyRamp_.isZero() || !velCutRamp_.isZero();
-    const bool cutRamping = cutoffRamp_.ramping();
-    const bool resRamping = resRamp_.ramping();
-    if (!newTerms && !cutRamping && !resRamping && !fenvRamp_.ramping() && !keyRamp_.ramping()
-        && !velCutRamp_.ramping())
-        return nullptr; // static v1 settings: the caller keeps the v1 code path
-
-    n = std::clamp(n, 0, kSubBlock);
-    for (int i = 0; i < n; ++i)
-    {
-        const bool r = cutoffRamp_.ramping();
-        const float lg = cutoffRamp_.next();
-        // Settled: the exact parameter value (not exp2(log2(x))), so static output stays exact.
-        modCutoff_[static_cast<size_t>(i)] = r ? std::exp2(lg) : filterParams_.cutoffHz;
-        modRes_[static_cast<size_t>(i)] = resRamp_.next();
-        modFenv_[static_cast<size_t>(i)] = fenvRamp_.next();
-        modKey_[static_cast<size_t>(i)] = keyRamp_.next();
-        modVel_[static_cast<size_t>(i)] = velCutRamp_.next();
-    }
-    filterMod_.cutoffHz = modCutoff_.data();
-    filterMod_.resonance = modRes_.data();
-    filterMod_.fenvOct = modFenv_.data();
-    filterMod_.keyTrack = modKey_.data();
-    filterMod_.velOct = modVel_.data();
-    filterMod_.resRamping = resRamping;
-    return &filterMod_;
 }
 
 void VoiceEngine::applyFilterGlobals(Voice& v) const
@@ -646,29 +554,25 @@ void VoiceEngine::startVoice(int voiceIndex, int note, int velocity, int channel
     v.releasing = false;
     v.gated = true;
     v.pedalHeld = false;
-    const float velLin = curvedVelocity(velocity);
-    v.velocityAmp = velocityGain(velocity);
-    v.velOct = velLin - 1.0f;
-    v.keyOct = static_cast<float>(note - 60) / 12.0f;
+    float velLin = std::clamp(velocity, 1, 127) / 127.0f;
+    if (map_ != nullptr)
+    {
+        switch (map_->velCurve)
+        {
+            case VelCurve::Soft: velLin = std::sqrt(velLin); break;
+            case VelCurve::Hard: velLin = velLin * velLin; break;
+            default: break;
+        }
+    }
+    v.velocityAmp = velLin;
     v.zoneGainLin = dbToLin(zone.gainDb);
     v.zoneGain.reset(v.zoneGainLin);
     v.fileToHostRatio = (v.buffer && sampleRate_ > 0.0)
                             ? (v.buffer->sampleRate / sampleRate_)
                             : 1.0;
     v.ampEnv.setSampleRate(sampleRate_);
-    if (velParams_.toAttack > 0.0f)
-    {
-        // Attack increment is fixed at note-on, so later setEnvParams calls keep this voice's time.
-        AmpEnv::Params ap = envParams_;
-        ap.attackMs = velocityAttackMs(velocity);
-        v.ampEnv.setParams(ap);
-    }
-    else
-        v.ampEnv.setParams(envParams_);
+    v.ampEnv.setParams(envParams_);
     v.ampEnv.noteOn(false);
-    v.filterEnv.setSampleRate(sampleRate_);
-    v.filterEnv.setParams(fenvParams_);
-    v.filterEnv.noteOn(false);
     v.filter.setSampleRate(sampleRate_);
     applyFilterGlobals(v);
     v.filter.reset();
@@ -761,7 +665,6 @@ void VoiceEngine::applyAuditionRequest() noexcept
             v.gated = false;
             v.pedalHeld = false;
             v.ampEnv.noteOff();
-            v.filterEnv.noteOff();
             v.releasing = true;
         }
     }
@@ -805,7 +708,6 @@ void VoiceEngine::noteOff(int note, int channel)
         {
             v.pedalHeld = false;
             v.ampEnv.noteOff();
-            v.filterEnv.noteOff();
             v.releasing = true;
         }
     }
@@ -823,7 +725,6 @@ void VoiceEngine::setSustainPedal(bool down)
             if (v.pedalHeld && !v.gated)
             {
                 v.ampEnv.noteOff();
-                v.filterEnv.noteOff();
                 v.releasing = true;
                 v.pedalHeld = false;
             }
@@ -846,7 +747,6 @@ void VoiceEngine::allNotesOff()
             v.gated = false;
             v.pedalHeld = false;
             v.ampEnv.noteOff();
-            v.filterEnv.noteOff();
             v.releasing = true;
         }
     }
@@ -868,7 +768,7 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
 
     const float envAmt = filterParams_.envAmount;
     const float baseCutoff = filterParams_.cutoffHz;
-    const bool legacyModulate = (envAmt != 0.0f) || (modCutoffOctaves_ != 0.0f);
+    const bool modulateCutoff = (envAmt != 0.0f) || (modCutoffOctaves_ != 0.0f);
 
     // Sub-blocks keep stream progress fresh for the reader threads (and bound how far a voice
     // reads ahead between publishes). Voices are independent per sample, so the mix is
@@ -876,21 +776,11 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
     for (int offset = 0; offset < numSamples; offset += kSubBlock)
     {
         const int n = std::min(kSubBlock, numSamples - offset);
-        // Smoothed / new filter modulation for this sub-block (nullptr = static v1 settings)
-        const FilterMod* mod = prepareFilterMod(n);
-        if (mod == nullptr && newModWasActive_ && !legacyModulate)
-        {
-            // Modulation just ended: back to the static cutoff / resonance.
-            for (auto& v : voices_)
-                applyFilterGlobals(v);
-        }
-        newModWasActive_ = mod != nullptr;
-        const bool modulateCutoff = legacyModulate || mod != nullptr;
         for (auto& v : voices_)
         {
             if (!v.active || !v.buffer)
                 continue;
-            renderVoice(v, left + offset, right + offset, n, modulateCutoff, envAmt, baseCutoff, mod);
+            renderVoice(v, left + offset, right + offset, n, modulateCutoff, envAmt, baseCutoff);
         }
     }
 
@@ -922,7 +812,7 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
 }
 
 void VoiceEngine::renderVoice(Voice& v, float* left, float* right, int numSamples, bool modulateCutoff,
-                              float envAmt, float baseCutoff, const FilterMod* mod) noexcept
+                              float envAmt, float baseCutoff) noexcept
 {
     const auto& buf = *v.buffer;
     const int64_t endFrame = v.zone.sampleEnd.has_value()
@@ -961,7 +851,6 @@ void VoiceEngine::renderVoice(Voice& v, float* left, float* right, int numSample
             v.active = false;
             break;
         }
-        const float fenv = v.filterEnv.process();
 
         if (v.readPos >= static_cast<double>(endFrame))
         {
@@ -970,7 +859,6 @@ void VoiceEngine::renderVoice(Voice& v, float* left, float* right, int numSample
             if (!v.releasing)
             {
                 v.ampEnv.noteOff();
-                v.filterEnv.noteOff();
                 v.releasing = true;
                 v.gated = false;
                 v.pedalHeld = false;
@@ -986,21 +874,11 @@ void VoiceEngine::renderVoice(Voice& v, float* left, float* right, int numSample
             else
                 hermiteRead(buf.interleaved.data(), buf.channels, buf.length, v.readPos, sL, sR);
 
-            // Cutoff modulation in octaves. The first line is the v1 expression (amp env + mod
-            // wheel); the new terms are exactly 0 when their amounts are 0, keeping v1 output.
+            // Amp-env -> filter: reuse amp ADSR to modulate cutoff in octaves
             if (modulateCutoff)
             {
-                float oct = envAmt * env + modCutoffOctaves_;
-                float base = baseCutoff;
-                if (mod != nullptr)
-                {
-                    const size_t k = static_cast<size_t>(i);
-                    oct += mod->fenvOct[k] * fenv + mod->keyTrack[k] * v.keyOct + mod->velOct[k] * v.velOct;
-                    base = mod->cutoffHz[k];
-                    if (mod->resRamping)
-                        v.filter.setResonance(mod->resonance[k]);
-                }
-                const float cutoff = base * std::exp2(oct);
+                const float oct = envAmt * env + modCutoffOctaves_;
+                const float cutoff = baseCutoff * std::exp2(oct);
                 v.filter.setCutoffHz(cutoff);
             }
 
@@ -1141,4 +1019,4 @@ const Voice* VoiceEngine::findActiveVoice(int note, int channel) const
     return nullptr;
 }
 
-} // namespace looper
+} // namespace looper_v1

@@ -1,4 +1,6 @@
 #include "SettingsView.h"
+#include <algorithm>
+#include <iterator>
 #include "Glyphs.h"
 #include "LooperLookAndFeel.h"
 #include "../Plugin/PluginProcessor.h"
@@ -119,16 +121,17 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     softClipBox_.addItem("On", 2);
     softClipBox_.onChange = [this] { applyEngineFromUi(); };
 
-    filterBox_.addItem("Low-pass", 1);
+    filterBox_.addItem("Low-pass 12 dB", 1);
     filterBox_.addItem("High-pass", 2);
     filterBox_.addItem("Band-pass", 3);
+    filterBox_.addItem("Low-pass 24 dB", 4);
     filterBox_.onChange = [this] { applyEngineFromUi(); };
 
     initRow(engineRows_[0], "Polyphony", "Voice steal: quietest releasing, then oldest", &polyBox_);
     initRow(engineRows_[1], "Interpolation", glyph::spaced("v1 default", glyph::emDash(), "higher quality sinc later"), &interpBox_);
     initRow(engineRows_[2], "Glide", "Legato portamento when enabled", &glideBox_);
     initRow(engineRows_[3], "Master soft-clip", "Optional ceiling when stacking many voices", &softClipBox_);
-    initRow(engineRows_[4], "Default filter type", "Per-patch override still on main view", &filterBox_);
+    initRow(engineRows_[4], "Default filter type", "Applied when changed here; each patch keeps its own (main view TYPE)", &filterBox_);
 
     // --- Mapping ---
     midCBox_.addItem("C4 = 60", 1);
@@ -185,15 +188,24 @@ SettingsView::SettingsView(LooperAudioProcessor& processor) : processor_(process
     initRow(mappingRows_[6], "Open review after import", "If any warning/confidence < 0.8", &reviewBox_);
 
     // --- MIDI ---
-    bendBox_.addItem(glyph::plusMinus() + "2 semitones", 1);
-    bendBox_.setSelectedId(1, juce::dontSendNotification);
-    // VoiceEngine / MidiRouter fixed +/-2 for v1 - store preference
+    // Per patch + host-automatable: presets set both "bendUp" and "bendDown" (main view BEND
+    // UP / DOWN sets them separately).
+    for (int n : kBendPresets)
+        bendBox_.addItem(glyph::plusMinus() + juce::String(n) + (n == 1 ? " semitone" : " semitones"), n + 1);
+    bendBox_.onChange = [this] {
+        const int id = bendBox_.getSelectedId();
+        if (id <= 0)
+            return;
+        for (const char* pid : { "bendUp", "bendDown" })
+            if (auto* param = processor_.apvts().getParameter(pid))
+                param->setValueNotifyingHost(param->convertTo0to1((float) (id - 1)));
+    };
 
     modBox_.addItem("FilterCutoff", 1);
     modBox_.addItem("Volume", 2);
     modBox_.onChange = [this] { applyMidiFromUi(); };
 
-    initRow(midiRows_[0], "Pitch bend range", "14-bit bend; VoiceEngine applies " + glyph::plusMinus() + "range", &bendBox_);
+    initRow(midiRows_[0], "Pitch bend range", "Per patch; up and down separately on the main view (BEND)", &bendBox_);
     initRow(midiRows_[1], "Mod wheel target", glyph::spaced("CC1", glyph::arrowRight(), "filter cutoff or volume"), &modBox_);
     initRow(midiRows_[2], "Sustain pedal", "CC64", nullptr);
     sustainNote_.setText(glyph::spaced("CC64 active", glyph::emDash(), "note-off deferred while pedal down (VoiceEngine)"),
@@ -437,7 +449,7 @@ void SettingsView::refreshFromProcessor()
     startNoteBox_.setEnabled(chromatic);
     reviewBox_.setSelectedId(p.openReviewAfterImport ? 1 : 2, juce::dontSendNotification);
 
-    bendBox_.setSelectedId(1, juce::dontSendNotification);
+    refreshBendBox();
     modBox_.setSelectedId(p.modWheelTarget == ModWheelTarget::Volume ? 2 : 1, juce::dontSendNotification);
 
     ramBox_.setSelectedId(processor_.loadIntoRam() ? 2 : 1, juce::dontSendNotification);
@@ -471,7 +483,7 @@ void SettingsView::applyEngineFromUi()
     const int gid = glideBox_.getSelectedId();
     prefs.glideMs = (gid >= 1 && gid <= 6) ? kGlideMs[gid] : 0.f;
     prefs.masterSoftClip = softClipBox_.getSelectedId() == 2;
-    prefs.defaultFilterType = juce::jlimit(0, 2, filterBox_.getSelectedId() - 1);
+    prefs.defaultFilterType = juce::jlimit(0, 3, filterBox_.getSelectedId() - 1);
     processor_.applySessionPrefs(prefs);
 }
 
@@ -519,10 +531,24 @@ void SettingsView::refreshNoteLabels(bool middleCIsC4)
 void SettingsView::applyMidiFromUi()
 {
     auto prefs = processor_.sessionPrefs();
-    prefs.pitchBendRangeSemis = 2.0f;
     prefs.modWheelTarget = (modBox_.getSelectedId() == 2) ? ModWheelTarget::Volume
                                                           : ModWheelTarget::FilterCutoff;
     processor_.applySessionPrefs(prefs);
+}
+
+void SettingsView::refreshBendBox()
+{
+    auto value = [this](const char* pid) {
+        auto* raw = processor_.apvts().getRawParameterValue(pid);
+        return raw != nullptr ? juce::roundToInt(raw->load()) : 2;
+    };
+    const int up = value("bendUp"), down = value("bendDown");
+    const bool preset = up == down && std::find(std::begin(kBendPresets), std::end(kBendPresets), up) != std::end(kBendPresets);
+    if (preset)
+        bendBox_.setSelectedId(up + 1, juce::dontSendNotification);
+    else
+        bendBox_.setText("+" + juce::String(up) + " / " + glyph::minus() + juce::String(down) + " semitones",
+                         juce::dontSendNotification);
 }
 
 void SettingsView::visibilityChanged()

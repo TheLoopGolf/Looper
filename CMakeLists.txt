@@ -122,6 +122,16 @@ if(LOOPER_BUILD_TESTS)
     target_link_libraries(StreamingTests PRIVATE LooperDsp LooperPatch)
     add_test(NAME StreamingTests COMMAND StreamingTests)
 
+    # Sound shaping: filter types (measured magnitude), filter envelope, key tracking, velocity
+    # amp / cutoff / attack, bend up / down, smoothing, stability, no allocation, and bit-exact
+    # renders of v1 patches against the frozen v1 engine in Tests/reference/v1.
+    add_executable(SoundShapingTests
+        Tests/SoundShapingTests.cpp
+        Tests/reference/v1/VoiceEngineV1.cpp)
+    target_include_directories(SoundShapingTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
+    target_link_libraries(SoundShapingTests PRIVATE LooperDsp LooperPatch)
+    add_test(NAME SoundShapingTests COMMAND SoundShapingTests)
+
     # Mojibake guard: non-ASCII UI text must go through Source/UI/Glyphs.h
     add_executable(SourceEncodingTests Tests/SourceEncodingTests.cpp)
     target_compile_definitions(SourceEncodingTests PRIVATE
@@ -211,6 +221,8 @@ if(LOOPER_BUILD_PLUGIN)
             Source/ZoneEdit/ZoneSelection.h
             Source/ZoneEdit/ZoneStrip.h
             Source/VoiceEngine/GainRamp.h
+            Source/VoiceEngine/ParamRamp.h
+            Source/SoundShaping/SoundParams.h
             Source/UI/ZoneEditorPanel.cpp
             Source/UI/ZoneEditorPanel.h
     )

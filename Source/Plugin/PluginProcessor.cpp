@@ -2,58 +2,155 @@
 #include "PluginEditor.h"
 #include "../Import/MapCommit.h"
 #include "../ZoneEdit/ZoneEditAction.h"
+#include "../SoundShaping/SoundParams.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
-float dbToLin(float db) { return juce::Decibels::decibelsToGain(db); }
+namespace pid = looper::sound::pid;
 
-looper::FilterType filterTypeFromChoice(int index)
+juce::String formatSemis (float v, int)
 {
-    switch (index)
-    {
-        case 1:  return looper::FilterType::HighPass;
-        case 2:  return looper::FilterType::BandPass;
-        default: return looper::FilterType::LowPass;
-    }
+    if (std::abs (v) < 0.005f)
+        return "0 st";
+    return (v > 0.0f ? "+" : "") + juce::String (v, std::abs (v) < 10.0f ? 1 : 0) + " st";
+}
+
+juce::String formatPercent (float v, int) { return juce::String (juce::roundToInt (v)) + "%"; }
+
+juce::String formatMs (float v, int)
+{
+    if (v >= 1000.0f)
+        return juce::String (v / 1000.0f, 2) + " s";
+    return juce::String (v, v < 10.0f ? 1 : 0) + " ms";
+}
+
+float parseNumber (const juce::String& text) { return text.retainCharacters ("+-.0123456789").getFloatValue(); }
+
+/** Accepts what formatMs prints ("850 ms", "1.20 s") as well as a bare number of milliseconds. */
+float parseMs (const juce::String& text)
+{
+    const auto t = text.trim().toLowerCase();
+    const bool seconds = t.endsWithChar ('s') && ! t.endsWith ("ms");
+    return parseNumber (t) * (seconds ? 1000.0f : 1.0f);
+}
+
+juce::String formatDb (float v, int)
+{
+    if (std::abs (v) < 0.05f)
+        return "0.0 dB";
+    return (v > 0.0f ? "+" : "") + juce::String (v, 1) + " dB";
+}
+
+juce::String formatHz (float v, int)
+{
+    if (v >= 1000.0f)
+        return juce::String (v / 1000.0f, v < 10000.0f ? 2 : 1) + " kHz";
+    return juce::String (juce::roundToInt (v)) + " Hz";
+}
+
+/** "1.5 kHz", "1.5k" and "850" (Hz) all parse. */
+float parseHz (const juce::String& text)
+{
+    const auto t = text.trim().toLowerCase();
+    return parseNumber (t) * (t.containsChar ('k') ? 1000.0f : 1.0f);
 }
 } // namespace
 
 juce::AudioProcessorValueTreeState::ParameterLayout LooperAudioProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
+    // Display / text-entry formats only: ranges, ids and defaults are unchanged from v1. The
+    // strings carry their unit, so no separate label (hosts would show it twice).
+    auto msAttr = juce::AudioParameterFloatAttributes()
+                      .withStringFromValueFunction(formatMs)
+                      .withValueFromStringFunction(parseMs);
+    auto semisAttr = juce::AudioParameterFloatAttributes()
+                         .withStringFromValueFunction(formatSemis)
+                         .withValueFromStringFunction(parseNumber);
+    auto pctAttr = juce::AudioParameterFloatAttributes()
+                       .withStringFromValueFunction(formatPercent)
+                       .withValueFromStringFunction(parseNumber);
+    auto dbAttr = juce::AudioParameterFloatAttributes()
+                      .withStringFromValueFunction(formatDb)
+                      .withValueFromStringFunction(parseNumber);
+    auto hzAttr = juce::AudioParameterFloatAttributes()
+                      .withStringFromValueFunction(formatHz)
+                      .withValueFromStringFunction(parseHz);
+    auto unitPctAttr = juce::AudioParameterFloatAttributes()   // 0..1 shown as 0..100%
+                           .withStringFromValueFunction([] (float v, int) { return formatPercent (v * 100.0f, 0); })
+                           .withValueFromStringFunction([] (const juce::String& t) { return parseNumber (t) / 100.0f; });
+    auto bendAttr = juce::AudioParameterIntAttributes()
+                        .withStringFromValueFunction([] (int v, int) { return juce::String (v) + " st"; })
+                        .withValueFromStringFunction([] (const juce::String& t) { return juce::roundToInt (parseNumber (t)); });
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"attack", 1}, "Attack",
-        juce::NormalisableRange<float>(0.1f, 5000.0f, 0.01f, 0.35f), 1.0f,
-        juce::AudioParameterFloatAttributes().withLabel("ms")));
+        juce::NormalisableRange<float>(0.1f, 5000.0f, 0.01f, 0.35f), 1.0f, msAttr));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"decay", 1}, "Decay",
-        juce::NormalisableRange<float>(1.0f, 5000.0f, 0.01f, 0.35f), 100.0f,
-        juce::AudioParameterFloatAttributes().withLabel("ms")));
+        juce::NormalisableRange<float>(1.0f, 5000.0f, 0.01f, 0.35f), 100.0f, msAttr));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"sustain", 1}, "Sustain",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.8f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.8f, unitPctAttr));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"release", 1}, "Release",
-        juce::NormalisableRange<float>(1.0f, 8000.0f, 0.01f, 0.35f), 200.0f,
-        juce::AudioParameterFloatAttributes().withLabel("ms")));
+        juce::NormalisableRange<float>(1.0f, 8000.0f, 0.01f, 0.35f), 200.0f, msAttr));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"volume", 1}, "Volume",
-        juce::NormalisableRange<float>(-60.0f, 12.0f, 0.01f), 0.0f,
-        juce::AudioParameterFloatAttributes().withLabel("dB")));
+        juce::NormalisableRange<float>(-60.0f, 12.0f, 0.01f), 0.0f, dbAttr));
+    // Index order is stored in patches / sessions: 0..2 are v1, "Low Pass 24" was appended.
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
         juce::ParameterID{"filterType", 1}, "Filter Type",
-        juce::StringArray{"Low Pass", "High Pass", "Band Pass"}, 0));
+        juce::StringArray{"Low Pass 12", "High Pass", "Band Pass", "Low Pass 24"}, 0));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"cutoff", 1}, "Cutoff",
-        juce::NormalisableRange<float>(20.0f, 20000.0f, 0.01f, 0.3f), 12000.0f,
-        juce::AudioParameterFloatAttributes().withLabel("Hz")));
+        juce::NormalisableRange<float>(20.0f, 20000.0f, 0.01f, 0.3f), 12000.0f, hzAttr));
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
         juce::ParameterID{"resonance", 1}, "Resonance",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.2f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.2f, unitPctAttr));
+    // v1 "Filter Env": the amp envelope modulating cutoff (octaves). Kept so old patches and
+    // automation sound the same; new patches use the dedicated filter envelope below.
     params.push_back(std::make_unique<juce::AudioParameterFloat>(
-        juce::ParameterID{"filterEnvAmt", 1}, "Filter Env",
-        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.001f), 0.0f));
+        juce::ParameterID{"filterEnvAmt", 1}, "Amp Env > Cutoff (legacy)",
+        juce::NormalisableRange<float>(-1.0f, 1.0f, 0.001f), 0.0f,
+        juce::AudioParameterFloatAttributes().withLabel("oct")));
+
+    // --- Sound shaping (v2). Defaults reproduce v1 (see looper::sound::kAddedParams). ---
+    using looper::sound::addedParamDefault;
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{pid::fenvAttack, 2}, "Filter Env Attack",
+        juce::NormalisableRange<float>(0.1f, 5000.0f, 0.01f, 0.35f), addedParamDefault(pid::fenvAttack), msAttr));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{pid::fenvDecay, 2}, "Filter Env Decay",
+        juce::NormalisableRange<float>(1.0f, 5000.0f, 0.01f, 0.35f), addedParamDefault(pid::fenvDecay), msAttr));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{pid::fenvSustain, 2}, "Filter Env Sustain",
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), addedParamDefault(pid::fenvSustain), unitPctAttr));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{pid::fenvRelease, 2}, "Filter Env Release",
+        juce::NormalisableRange<float>(1.0f, 8000.0f, 0.01f, 0.35f), addedParamDefault(pid::fenvRelease), msAttr));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{pid::fenvAmount, 2}, "Filter Env Amount",
+        juce::NormalisableRange<float>(-60.0f, 60.0f, 0.01f), addedParamDefault(pid::fenvAmount), semisAttr));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{pid::keyTrack, 2}, "Filter Key Track",
+        juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), addedParamDefault(pid::keyTrack), pctAttr));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{pid::velAmp, 2}, "Velocity > Amp",
+        juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), addedParamDefault(pid::velAmp), pctAttr));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{pid::velCutoff, 2}, "Velocity > Cutoff",
+        juce::NormalisableRange<float>(-60.0f, 60.0f, 0.01f), addedParamDefault(pid::velCutoff), semisAttr));
+    params.push_back(std::make_unique<juce::AudioParameterFloat>(
+        juce::ParameterID{pid::velAttack, 2}, "Velocity > Attack",
+        juce::NormalisableRange<float>(0.0f, 100.0f, 0.1f), addedParamDefault(pid::velAttack), pctAttr));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{pid::bendUp, 2}, "Pitch Bend Up", 0, 48, (int) addedParamDefault(pid::bendUp),
+        bendAttr));
+    params.push_back(std::make_unique<juce::AudioParameterInt>(
+        juce::ParameterID{pid::bendDown, 2}, "Pitch Bend Down", 0, 48, (int) addedParamDefault(pid::bendDown),
+        bendAttr));
     // Round-robin mode (per patch; mirrored into .looper.json map.roundRobinMode).
     // Index order must match looper::RoundRobinMode (0 = Cycle default, 1 = Random).
     params.push_back(std::make_unique<juce::AudioParameterChoice>(
@@ -293,14 +390,8 @@ void LooperAudioProcessor::applyPrefsToRuntime()
     voiceEngine_.setPolyphony(prefs_.polyphony);
     voiceEngine_.setMasterSoftClip(prefs_.masterSoftClip);
     // Glide: stored on InstrumentMap.glideMs; VoiceEngine applies legato portamento when > 0.
-    midiRouter_.setBendRangeSemis(prefs_.pitchBendRangeSemis);
+    // Pitch-bend range is a per-patch parameter now (bendUp / bendDown, pushed every block).
     midiRouter_.setModWheelTarget(prefs_.modWheelTarget);
-
-    if (auto* param = apvts_.getParameter("filterType"))
-    {
-        const float denorm = static_cast<float>(prefs_.defaultFilterType);
-        param->setValueNotifyingHost(param->convertTo0to1(denorm));
-    }
 
     // Push map-global fields onto the live map when present
     auto next = copyInstrumentMap();
@@ -311,32 +402,32 @@ void LooperAudioProcessor::applyPrefsToRuntime()
 void LooperAudioProcessor::applySessionPrefs(const SessionPrefs& prefs)
 {
     jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    const bool defaultFilterChanged = prefs.defaultFilterType != prefs_.defaultFilterType;
     prefs_ = prefs;
     prefs_.polyphony = juce::jlimit(1, 128, prefs_.polyphony);
     prefs_.glideMs = juce::jmax(0.0f, prefs_.glideMs);
     prefs_.preloadFrames = juce::jlimit(SessionPrefs::kMinPreloadFrames, SessionPrefs::kMaxPreloadFrames,
                                         prefs_.preloadFrames);
     applyPrefsToRuntime();
+    // Settings > Default filter type applies to the current patch when the user changes it. It is
+    // no longer re-applied on every prefs push (that used to override a restored session's filter).
+    if (defaultFilterChanged)
+        if (auto* param = apvts_.getParameter(pid::filterType))
+            param->setValueNotifyingHost(param->convertTo0to1(
+                static_cast<float>(juce::jlimit(0, 3, prefs_.defaultFilterType))));
     syncParamsToEngine();
     reloadSamplesForStreaming(); // no-op unless the preload size changed
 }
 
 void LooperAudioProcessor::syncParamsToEngine()
 {
-    looper::AmpEnv::Params env;
-    env.attackMs = apvts_.getRawParameterValue("attack")->load();
-    env.decayMs = apvts_.getRawParameterValue("decay")->load();
-    env.sustain = apvts_.getRawParameterValue("sustain")->load();
-    env.releaseMs = apvts_.getRawParameterValue("release")->load();
-    voiceEngine_.setEnvParams(env);
-    voiceEngine_.setMasterGainLin(dbToLin(apvts_.getRawParameterValue("volume")->load()));
-
-    looper::FilterParams fp;
-    fp.type = filterTypeFromChoice((int) apvts_.getRawParameterValue("filterType")->load());
-    fp.cutoffHz = apvts_.getRawParameterValue("cutoff")->load();
-    fp.resonance = apvts_.getRawParameterValue("resonance")->load();
-    fp.envAmount = apvts_.getRawParameterValue("filterEnvAmt")->load();
-    voiceEngine_.setFilterParams(fp);
+    // Amp / filter / filter env / velocity / bend: one mapping shared with the unit tests.
+    const auto sp = looper::sound::fromRawValues([this] (const char* id) {
+        auto* raw = apvts_.getRawParameterValue(id);
+        jassert(raw != nullptr);
+        return raw != nullptr ? raw->load() : 0.0f;
+    });
+    looper::sound::applyToEngine(sp, voiceEngine_, midiRouter_);
     voiceEngine_.setRoundRobinMode(currentRoundRobinMode());
 
     looper::ModWheelTarget target = looper::ModWheelTarget::FilterCutoff;
@@ -420,12 +511,8 @@ Patch LooperAudioProcessor::buildCurrentPatch() const
     patch.map.rrMode = currentRoundRobinMode(); // APVTS "rrMode" is the live source of truth
     patch.samples = userSampleRefs_;
 
-    // Snapshot host-automatable floats for convenience (restored on load when present).
-    static const char* kIds[] = {
-        "attack", "decay", "sustain", "release", "volume",
-        "filterType", "cutoff", "resonance", "filterEnvAmt"
-    };
-    for (auto* id : kIds)
+    // Snapshot host-automatable sound parameters (restored on load; missing ones get v1 values).
+    for (auto* id : looper::sound::kPatchParamIds)
         if (auto* raw = apvts_.getRawParameterValue(id))
             patch.params[id] = static_cast<double>(raw->load());
     return patch;
@@ -520,6 +607,9 @@ bool LooperAudioProcessor::applyPatch(const Patch& patch, juce::StringArray* mis
             param->setValueNotifyingHost(param->convertTo0to1(denorm));
         }
     }
+    // Patches saved before the sound-shaping release: the new parameters take the values that
+    // reproduce the old sound (not whatever the previous patch left behind).
+    resetMissingAddedParams([&patch] (const std::string& id) { return patch.params.count(id) > 0; });
     // Patch field wins for RR mode (older patches without it load as Cycle).
     setRoundRobinMode(patch.map.rrMode);
 
@@ -713,7 +803,11 @@ void LooperAudioProcessor::setStateInformation(const void* data, int sizeInBytes
     // Legacy: bare APVTS state
     if (xml->hasTagName(apvts_.state.getType()))
     {
-        apvts_.replaceState(juce::ValueTree::fromXml(*xml));
+        const auto tree = juce::ValueTree::fromXml(*xml);
+        apvts_.replaceState(tree);
+        resetMissingAddedParams([&tree] (const std::string& id) {
+            return tree.getChildWithProperty("id", juce::String(id)).isValid();
+        });
         syncParamsToEngine();
         return;
     }
@@ -733,7 +827,13 @@ void LooperAudioProcessor::setStateInformation(const void* data, int sizeInBytes
     }
 
     if (auto paramsTree = root.getChildWithName(apvts_.state.getType()); paramsTree.isValid())
+    {
         apvts_.replaceState(paramsTree);
+        // APVTS keeps the current value for ids the saved tree lacks: give them their v1 values.
+        resetMissingAddedParams([&paramsTree] (const std::string& id) {
+            return paramsTree.getChildWithProperty("id", juce::String(id)).isValid();
+        });
+    }
 
     const auto patchJson = root.getProperty("patchJson", "").toString();
     if (patchJson.isNotEmpty())
@@ -753,6 +853,46 @@ void LooperAudioProcessor::setStateInformation(const void* data, int sizeInBytes
 
     applyPrefsToRuntime();
     syncParamsToEngine();
+}
+
+void LooperAudioProcessor::resetMissingAddedParams(const std::function<bool(const std::string&)>& has)
+{
+    for (const auto& added : looper::sound::kAddedParams)
+    {
+        if (has(added.id))
+            continue;
+        float value = added.value;
+        // v1 bend range lived in session prefs (always +/-2 from the UI): carry it over.
+        if (std::string(added.id) == pid::bendUp || std::string(added.id) == pid::bendDown)
+            value = (float) juce::jlimit(0, 48, juce::roundToInt(prefs_.pitchBendRangeSemis));
+        if (auto* param = apvts_.getParameter(added.id))
+            param->setValueNotifyingHost(param->convertTo0to1(value));
+    }
+}
+
+void LooperAudioProcessor::convertLegacyFilterEnv()
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    auto raw = [this] (const char* id) { return apvts_.getRawParameterValue(id)->load(); };
+    const float legacyOct = raw(pid::filterEnvAmt);
+    if (juce::exactlyEqual(legacyOct, 0.0f))
+        return;
+    auto set = [this] (const char* id, float value) {
+        if (auto* param = apvts_.getParameter(id))
+            param->setValueNotifyingHost(param->convertTo0to1(value));
+    };
+    if (juce::exactlyEqual(raw(pid::fenvAmount), 0.0f))
+    {
+        // Same shape (amp ADSR), same depth in semitones.
+        set(pid::fenvAttack, raw(pid::attack));
+        set(pid::fenvDecay, raw(pid::decay));
+        set(pid::fenvSustain, raw(pid::sustain));
+        set(pid::fenvRelease, raw(pid::release));
+        set(pid::fenvAmount, juce::jlimit(-60.0f, 60.0f, legacyOct * 12.0f));
+    }
+    set(pid::filterEnvAmt, 0.0f); // the old amp-env modulation is switched off
+    if (hasUserInstrument_.load())
+        editState_.markExternalChange();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()

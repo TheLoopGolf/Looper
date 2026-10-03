@@ -65,14 +65,33 @@ public:
 
 private:
     void changeListenerCallback (juce::ChangeBroadcaster*) override;
-    void timerCallback() override { updateMemoryChip(); }
+    void timerCallback() override { updateMemoryChip(); updateLegacyEnvChip(); }
     void visibilityChanged() override;
     /** Rebuild zone rows, strip, status and editor after an edit / undo / redo. */
     void refreshZoneViews();
     void rebuildZoneRows();
     void updateStatus();
     juce::String noteName (int midi) const;
-    void styleKnob (juce::Slider& s, juce::Label& label, const juce::String& name);
+    void styleKnob (juce::Slider& s, juce::Label& label, const juce::String& name,
+                    const juce::String& tooltip = {}, bool bipolar = false, bool brass = false);
+    /** Show the "amp env > cutoff (legacy)" chip only while an old patch uses that modulation. */
+    void updateLegacyEnvChip();
+
+    /** Sound deck (bottom card): two rows of ten cells, shared by paint() and resized(). */
+    static constexpr int kPerfH = 190;
+    struct PerfLayout
+    {
+        juce::Rectangle<int> card;
+        juce::Rectangle<int> rowTitle[2];   // section caption strips
+        juce::Rectangle<int> rowCells[2];   // knob cells area
+        int cellW = 0;
+        juce::Rectangle<int> cell (int row, int index, int span = 1) const
+        {
+            const auto& r = rowCells[row];
+            return { r.getX() + index * cellW, r.getY(), cellW * span, r.getHeight() };
+        }
+    };
+    PerfLayout perfLayout() const;
     void styleSecondaryButton (juce::TextButton& b);
     void styleBrassButton (juce::TextButton& b);
     void openChooser();
@@ -99,7 +118,7 @@ private:
     LooperLookAndFeel lookAndFeel_;
 
     juce::Label brand_, brandSub_, subtitle_, status_, dropHint_, samplesTitle_;
-    juce::Label ampTitle_, filterTitle_;
+    juce::Label ampTitle_, filterTitle_, velTitle_, fenvTitle_, bendTitle_;
     juce::TextButton reviewBtn_ { "Review map" };
     juce::TextButton addBtn_ { "+ Samples" };
     juce::TextButton openBtn_;   // "Open..." (ellipsis glyph set in the constructor)
@@ -148,15 +167,21 @@ private:
     juce::ListBox sampleList_;
     juce::Rectangle<int> listHeaderArea_;
 
-    juce::Slider vol_, atk_, dec_, sus_, rel_, cut_, res_, env_;
-    juce::Label volL_, atkL_, decL_, susL_, relL_, cutL_, resL_, envL_;
-    juce::ComboBox filterBox_;
-    juce::Label filterLabel_;
+    // Row 1: AMP | FILTER (type + cutoff / resonance / key tracking)
+    juce::Slider vol_, atk_, dec_, sus_, rel_, cut_, res_, key_;
+    juce::Label volL_, atkL_, decL_, susL_, relL_, cutL_, resL_, keyL_;
+    // Row 2: VELOCITY | FILTER ENV | BEND
+    juce::Slider velAmp_, velCut_, velAtk_, fAtk_, fDec_, fSus_, fRel_, fAmt_, bendUp_, bendDown_;
+    juce::Label velAmpL_, velCutL_, velAtkL_, fAtkL_, fDecL_, fSusL_, fRelL_, fAmtL_, bendUpL_, bendDownL_;
+    // Filter type: LP12 | LP24 | BP | HP over the "filterType" choice (stored LP12, HP, BP, LP24)
+    SegmentedChoice filterType_ { juce::StringArray { "LP12", "LP24", "BP", "HP" } };
+    juce::Label filterTypeL_;
+    // v1 patches only: amp envelope -> cutoff ("filterEnvAmt"); click moves it to the filter env
+    juce::TextButton legacyEnvChip_;
+    float legacyEnvShown_ = 0.0f;
 
     using SliderAtt = juce::AudioProcessorValueTreeState::SliderAttachment;
-    using ComboAtt = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
-    std::unique_ptr<SliderAtt> volA_, atkA_, decA_, susA_, relA_, cutA_, resA_, envA_;
-    std::unique_ptr<ComboAtt> filterA_;
+    std::vector<std::unique_ptr<SliderAtt>> knobAttachments_;
 
     bool dragHighlight_ = false;
     std::unique_ptr<juce::FileChooser> chooser_;

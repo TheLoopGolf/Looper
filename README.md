@@ -34,11 +34,13 @@ Source/
   SamplePool/       SampleBuffer pool (RAM or preload + stream source, lock-free snapshots +
                     hazard pointers, deferred GC) + demo tone; MemoryFormat (RAM / status text)
   VoiceEngine/      Polyphony, steal, Hermite + AmpEnv + SVF; vel layers + RR (Cycle / Random, FastRng);
-                    GainRamp (20 ms zone-gain glide), exact-zone audition (lock-free request);
+                    GainRamp (20 ms zone-gain glide), ParamRamp (20 ms filter-param glide), filter env,
+                    key tracking, velocity → amp / cutoff / attack; exact-zone audition (lock-free request);
                     DiskStreamer (reader threads + per-voice rings, underrun fade, offline block-read)
   AmpEnv/           Linear ADSR (min attack 0.1 ms)
-  Filter/           Linear Simper SVF (LP/HP/BP, dual-state stereo)
-  MidiRouter/       Note/CC + pitch bend (±2 st); CC1 → cutoff when target FilterCutoff
+  Filter/           Linear Simper SVF (LP12/HP/BP, + LP24 = SVF + Butterworth stage, dual-state stereo)
+  MidiRouter/       Note/CC + pitch bend (separate up / down range, default ±2 st); CC1 → cutoff when target FilterCutoff
+  SoundShaping/     SoundParams.h: parameter ids, v1-compatible defaults, raw values → engine (no JUCE)
   PatchStore/       JSON sidecar (.looper.json) — relative sample paths, schema v1;
                     SampleRelocator (find moved/missing samples, no JUCE)
   UI/               MainView (drop/loaded, ZONES list, multi-select), ZoneEditorPanel (mixed values),
@@ -70,6 +72,9 @@ Tests/
   StreamingTests.cpp bit-exact streamed vs full playback (pitch ratios, boundary, glide, WAV
                     formats), underrun fade/recovery, slot steal/reuse, offline, no audio-thread
                     alloc, 128 voices, live swap + GC, small samples in RAM, loadIntoRam persistence
+  SoundShapingTests.cpp filter magnitude per type, filter env / key track / velocity / bend maths,
+                    smoothing without discontinuities, extreme-setting stability, v1 bit-exact renders
+                    (frozen v1 engine in Tests/reference/v1/)
   ZoneStripTests.cpp strip geometry / snapping / hit-test, drag maths (edges, root, body, Alt-draw,
                     clamping, no inversion), selection rules, mixed values, relative / absolute group
                     edits, all-or-nothing group records, saved-state tracking, gain ramp (no step,
@@ -131,6 +136,7 @@ Every imported sample is analysed on import (cached per sample) with
 | Demo RAM sample + single full-range zone | **Done** |
 | Linear AmpEnv ADSR + APVTS params | **Done** |
 | SVF (LP/HP/BP) + cutoff / res / env amt APVTS | **Done** |
+| Sound shaping: LP12/LP24/BP/HP, filter envelope, key tracking, velocity → amp/cutoff/attack, bend up/down | **Done** — see below |
 | Map RR / velocity layers at play | **Done** (RR Cycle or Random per patch; vel layers by range) |
 | Streaming sample I/O | **Done** - preload + disk streaming, Load fully into RAM option; see below |
 | Patch JSON save/load + host state | **Done** |
@@ -205,6 +211,16 @@ Rules live in `Source/ZoneEdit/` (no JUCE) and are covered by `ZoneEditorTests` 
 
 **Format sketch (schemaVersion 1):** `name`, `patchRoot`, `samples[]` (`id`, `path`, …), `map` (globals incl. optional `roundRobinMode` + `zones[]`, each zone with an optional `auto` snapshot for Reset to auto), optional `params` (APVTS float snapshot).
 
+### Shape the sound (main view sound deck)
+
+The bottom of the main view has two rows of knobs. **AMP** (VOL ATK DEC SUS REL) and **FILTER**
+(TYPE **LP12 / LP24 / BP / HP**, CUT, RES, KEY tracking 0–100 %) on top; **VELOCITY** (AMP, CUT,
+ATK), **FILTER ENV** (ATK DEC SUS REL, bipolar AMT in semitones) and **BEND** (UP / DOWN semitones)
+below. All are automatable, saved per patch, and smoothed (20 ms) so sweeps don't zipper. Old
+patches sound exactly as before; one that used v1's amp-env → cutoff knob shows a sand chip that
+moves it onto the filter envelope. Formula, parameter ids/ranges and limitations:
+[docs/sound-shaping.md](docs/sound-shaping.md).
+
 ### Disk streaming (long samples)
 
 Samples longer than the **preload** (default 64k frames, about 1.5 s) keep only their start in RAM;
@@ -239,7 +255,7 @@ JUCE is pulled via **CMake FetchContent** (not vendored). Requires CMake ≥ 3.2
 cmake -S . -B build -DLOOPER_BUILD_PLUGIN=OFF -DLOOPER_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
-# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/PitchMappingTests && ./build/StreamingTests && ./build/SourceEncodingTests && ./build/ZoneEditorTests && ./build/ZoneStripTests
+# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/PitchMappingTests && ./build/StreamingTests && ./build/SourceEncodingTests && ./build/ZoneEditorTests && ./build/ZoneStripTests && ./build/SoundShapingTests
 ```
 
 ### Full plugin (macOS / Windows recommended)
@@ -263,9 +279,9 @@ Open the **gear** button (top-right on the main view) in Standalone or the plugi
 
 | Tab | Controls |
 |-----|----------|
-| **Engine** | Polyphony (1–128) → map + voice engine; Interpolation (Hermite; sinc later); Glide ms (stored on map; engine portamento TODO); Master soft-clip On/Off (tanh on voice sum); Default filter LP/HP/BP → APVTS |
+| **Engine** | Polyphony (1–128) → map + voice engine; Interpolation (Hermite; sinc later); Glide ms (stored on map; engine portamento TODO); Master soft-clip On/Off (tanh on voice sum); Default filter type LP12 / LP24 / HP / BP (applied when changed here; patches keep their own) |
 | **Mapping** | Middle C C4 = 60 (default) / C3 = 60; Key span full 0–127 vs natural; Round-robin mode Cycle / Random (per patch, same parameter as the main-view switch); Velocity curve Linear/Soft/Hard; No clear pitch: Spread chromatically (default) / Fixed root C4, full range (legacy); Unpitched start key (default MIDI 36); Open review after import On/Off |
-| **MIDI** | Pitch bend ±2 (stored; engine uses range); Mod target FilterCutoff / Volume; Sustain CC64 note (TODO); Clear MIDI learn stub |
+| **MIDI** | Pitch bend range presets ±1…±48 (sets the patch's BEND UP/DOWN; asymmetric values shown as +U / −D); Mod target FilterCutoff / Volume; Sustain CC64 note (TODO); Clear MIDI learn stub |
 | **Files** | Last patch path; missing-file policy (silent zones + Relocate…); Reveal last patch folder |
 | **Memory** | Sample memory: Stream long samples (default) / Load fully into RAM (per patch); Preload size 16k–1024k frames (default 64k, session); live status + Reset dropout count |
 | **About** | Looper / Loop Audio Lab / version / GitHub URL |
@@ -284,14 +300,14 @@ Session prefs persist in host state (`prefsJson` alongside patch). Mapping optio
 
 ## Next milestone
 
-Optional dedicated filter envelope; sustain pedal; real-DAW testing of streaming on slow drives.
+Sustain pedal; real-DAW testing of streaming on slow drives and of the sound deck.
 
 ## Contributing / next steps
 
 1. Zone editor: velocity × key grid view (drag velocity ranges too); zoom / scroll for the strip.
 2. Per-row manual root-key editing in Review (beyond "Use detected"); the main-view zone editor covers it after Accept.
 3. Relocate: optional file-hash verification of candidates.
-4. Parameter smoothing on continuous filter/env params; finish glide DSP.
+4. Smooth volume per sample and crossfade filter-type switches; finish glide DSP.
 5. Choose LICENSE compatible with your JUCE license (GPL vs commercial).
 
 ---

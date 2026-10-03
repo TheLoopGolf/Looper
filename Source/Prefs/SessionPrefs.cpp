@@ -111,7 +111,7 @@ std::optional<SessionPrefs> SessionPrefs::fromJson(const std::string& json)
     if (auto b = findBoolField(json, "masterSoftClip"))
         p.masterSoftClip = *b;
     if (auto n = findNumberField(json, "defaultFilterType"))
-        p.defaultFilterType = std::clamp(static_cast<int>(std::lround(*n)), 0, 2);
+        p.defaultFilterType = std::clamp(static_cast<int>(std::lround(*n)), 0, 3);
     if (auto b = findBoolField(json, "middleCIsC4"))
         p.middleCIsC4 = *b;
     if (auto b = findBoolField(json, "preferFullKeyboardSpan"))

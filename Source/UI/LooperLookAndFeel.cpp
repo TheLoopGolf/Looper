@@ -73,11 +73,23 @@ void LooperLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int w
     g.setColour (Palette::border());
     g.strokePath (track, juce::PathStrokeType (1.2f));
 
-    if (slider.isEnabled() && sliderPosProportional > 0.001f)
+    // Bipolar knobs (e.g. envelope / velocity amounts) fill from 12 o'clock toward the value.
+    const bool bipolar = (bool) slider.getProperties().getWithDefault ("bipolar", false);
+    const float fromAngle = bipolar ? 0.5f * (rotaryStartAngle + rotaryEndAngle) : rotaryStartAngle;
+    if (bipolar)
+    {
+        const float r0 = radius - trackThickness - 1.0f, r1 = radius + 0.5f;
+        const float sx = std::sin (fromAngle), cy = -std::cos (fromAngle);
+        g.setColour (Palette::borderBright());
+        g.drawLine (centre.x + r0 * sx, centre.y + r0 * cy, centre.x + r1 * sx, centre.y + r1 * cy, 1.2f);
+    }
+    const bool showArc = bipolar ? std::abs (sliderPosProportional - 0.5f) > 0.002f : sliderPosProportional > 0.001f;
+    if (slider.isEnabled() && showArc)
     {
         juce::Path valueArc;
         valueArc.addCentredArc (centre.x, centre.y, radius - trackThickness * 0.5f,
-                                radius - trackThickness * 0.5f, 0.0f, rotaryStartAngle, toAngle, true);
+                                radius - trackThickness * 0.5f, 0.0f,
+                                juce::jmin (fromAngle, toAngle), juce::jmax (fromAngle, toAngle), true);
         g.setColour (slider.findColour (juce::Slider::rotarySliderFillColourId));
         g.strokePath (valueArc, juce::PathStrokeType (trackThickness, juce::PathStrokeType::curved,
                                                       juce::PathStrokeType::rounded));

@@ -14,7 +14,9 @@
 #include "../ZoneEdit/ZoneEditor.h"
 
 #include <atomic>
+#include <functional>
 #include <memory>
+#include <string>
 #include <mutex>
 #include <vector>
 
@@ -190,6 +192,15 @@ public:
     looper::DiskStreamer& diskStreamer() { return diskStreamer_; }
     VoiceEngine& voiceEngine() { return voiceEngine_; }
 
+    // --- Sound shaping ------------------------------------------------------------------------
+    /**
+     * Message thread: move a v1 "amp env > cutoff" amount (filterEnvAmt) onto the dedicated
+     * filter envelope (amp ADSR copied, depth x 12 semitones; sounds the same up to float
+     * rounding) and zero the legacy amount. If the filter envelope is already in use (amount
+     * != 0) it is left alone and only the legacy modulation is removed. No-op when it is 0.
+     */
+    void convertLegacyFilterEnv();
+
     const SessionPrefs& sessionPrefs() const { return prefs_; }
     /** Apply prefs to engine / map / APVTS defaults and remember for persistence. */
     void applySessionPrefs(const SessionPrefs& prefs);
@@ -206,6 +217,8 @@ private:
     void reloadSamplesForStreaming();
     /** Allocate stream rings once any loaded sample actually streams. */
     void ensureStreamingReady();
+    /** Give every post-v1 parameter that `has` does not know its v1-equivalent value. */
+    void resetMissingAddedParams(const std::function<bool(const std::string&)>& has);
 
     juce::AudioProcessorValueTreeState apvts_;
     // Declaration order matters: the pool and streamer must outlive the voice engine.

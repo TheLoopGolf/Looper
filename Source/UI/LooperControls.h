@@ -21,8 +21,15 @@ public:
     explicit SegmentedChoice (juce::StringArray options);
     ~SegmentedChoice() override;
 
-    /** Bind to a choice/int parameter whose values are 0..numSegments-1. */
+    /** Bind to a choice/int parameter whose values are 0..numSegments-1 (or setSegmentValues). */
     void attachToParameter (juce::RangedAudioParameter& param);
+
+    /**
+     * Parameter value of each segment, when the display order differs from the choice order
+     * (e.g. LP12 | LP24 | BP | HP over a choice stored as LP12, HP, BP, LP24). Call before
+     * attachToParameter. Empty = identity.
+     */
+    void setSegmentValues (juce::Array<int> values) { segmentValues_ = std::move (values); }
 
     int getSelectedIndex() const noexcept { return selected_; }
     void setSelectedIndex (int index, juce::NotificationType notify);
@@ -49,7 +56,11 @@ private:
     juce::Rectangle<float> segmentBounds (int index) const;
     void userSelect (int index);
 
+    int valueForSegment (int segment) const;
+    int segmentForValue (int value) const;
+
     juce::StringArray options_;
+    juce::Array<int> segmentValues_;
     int selected_ = 0;
     int hover_ = -1;
     bool subdued_ = false;

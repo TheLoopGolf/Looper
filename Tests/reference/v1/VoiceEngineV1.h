@@ -1,13 +1,15 @@
 #pragma once
+// FROZEN REFERENCE - do not edit. Verbatim copy of Source/VoiceEngine/VoiceEngine.h at commit 3eb8926 (pre sound-shaping),
+// renamed into namespace looper_v1. SoundShapingTests renders old patches through this engine and
+// through the current one and requires bit-identical output (backward compatibility).
 
-#include "../AmpEnv/AmpEnv.h"
-#include "../Filter/SvfFilter.h"
-#include "../InstrumentMap/InstrumentMap.h"
-#include "../SamplePool/SamplePool.h"
-#include "DiskStreamer.h"
-#include "FastRng.h"
-#include "GainRamp.h"
-#include "ParamRamp.h"
+#include "AmpEnvV1.h"
+#include "SvfFilterV1.h"
+#include "InstrumentMap/InstrumentMap.h"
+#include "SamplePool/SamplePool.h"
+#include "VoiceEngine/DiskStreamer.h"
+#include "VoiceEngine/FastRng.h"
+#include "VoiceEngine/GainRamp.h"
 
 #include <array>
 #include <atomic>
@@ -17,7 +19,9 @@
 #include <string>
 #include <vector>
 
-namespace looper {
+namespace looper {}
+namespace looper_v1 {
+using namespace looper;
 
 struct Voice
 {
@@ -43,13 +47,7 @@ struct Voice
     int zoneIndex = -1;
     std::shared_ptr<const SampleBuffer> buffer;
     AmpEnv ampEnv;
-    /** Dedicated filter envelope (gated with ampEnv; the voice ends with the amp envelope). */
-    AmpEnv filterEnv;
     SvfFilter filter; // dual-state stereo SVF
-    /** Key tracking source: (note - 60) / 12, octaves from middle C (MIDI 60 = no change). */
-    float keyOct = 0.0f;
-    /** Velocity -> cutoff source: curved velocity - 1 (0 at velocity 127, about -1 at the softest). */
-    float velOct = 0.0f;
     bool releasing = false;
     /** Key physically held (noteOn without matching noteOff yet). */
     bool gated = false;
@@ -81,40 +79,12 @@ struct FilterParams
     FilterType type = FilterType::LowPass;
     float cutoffHz = 12000.0f;
     float resonance = 0.2f;   // 0..1
-    /** v1 "Filter Env": amp ADSR -> cutoff, -1..1 octaves at full amp env (legacy, kept bit-exact). */
-    float envAmount = 0.0f;
-    /** Dedicated filter envelope depth in semitones at full envelope (bipolar). */
-    float fenvAmountSemis = 0.0f;
-    /** Key tracking 0..1 (1 = cutoff follows the played note 1:1, pivot MIDI 60). */
-    float keyTrack = 0.0f;
-    /**
-     * Velocity -> cutoff in semitones. At velocity 127 the cutoff is the knob value; softer notes
-     * move it by up to -amount (positive = softer is darker, harder is brighter).
-     */
-    float velToCutoffSemis = 0.0f;
-};
-
-/** Note-on velocity destinations (sampled when a note starts). */
-struct VelocityParams
-{
-    /** 0..1: how much velocity (after the map's curve) scales the amp. 1 = v1 behaviour, 0 = off. */
-    float toAmp = 1.0f;
-    /**
-     * 0..1: velocity -> amp attack time. At velocity 127 the attack is the knob value; softer
-     * notes stretch it by up to 2^(kAttackOctaves * amount) (harder = faster). 0 = off (v1).
-     */
-    float toAttack = 0.0f;
-    static constexpr float kAttackOctaves = 4.0f; // 100 % -> softest note attacks up to 16x slower
+    float envAmount = 0.0f;   // −1..1 octaves at full amp env
 };
 
 /**
  * Polyphonic voice engine: Hermite resample + AmpEnv ADSR + per-voice SVF.
- * Cutoff per sample = cutoff * 2^(envAmount * ampEnv + modWheel                      (v1 terms)
- *                               + fenvAmount/12 * filterEnv + keyTrack * (note-60)/12
- *                               + velToCutoff/12 * (vel - 1))                           (new terms)
- * Cutoff / resonance / env amount / key track / vel->cutoff glide over ~20 ms when changed while
- * notes sound (ParamRamp); with static settings and the new terms at 0 the output is bit-identical
- * to v1.
+ * Filter envelope reuses amp ADSR (cutoff *= 2^(envAmount * env)).
  * Zone pick: velocity layers + round-robin per rrGroup (Cycle or Random, see RoundRobinMode).
  * Legato portamento when InstrumentMap.glideMs > 0; CC64 sustain via setSustainPedal.
  */
@@ -202,31 +172,7 @@ public:
     static constexpr int kSubBlock = 256;
 
     void setEnvParams(const AmpEnv::Params& p);
-    /**
-     * Filter type / cutoff / resonance / modulation depths. Call every block with the current
-     * parameter values: changes glide over ~20 ms while voices sound (snap when silent).
-     */
     void setFilterParams(const FilterParams& p);
-    /** Dedicated filter envelope ADSR (same semantics / ranges as the amp envelope). */
-    void setFilterEnvParams(const AmpEnv::Params& p);
-    const AmpEnv::Params& filterEnvParams() const { return fenvParams_; }
-    /** Velocity destinations; applied at the next note-on. */
-    void setVelocityParams(const VelocityParams& p) { velParams_ = p; }
-    const VelocityParams& velocityParams() const { return velParams_; }
-
-    /** Linear amp gain of a note-on velocity after the map's curve and the vel->amp amount. */
-    float velocityGain(int velocity) const noexcept;
-    /** Amp attack (ms) a note-on velocity gets after vel->attack scaling. */
-    float velocityAttackMs(int velocity) const noexcept;
-    /** Velocity after the map's curve, 0..1 (1 at 127). */
-    float curvedVelocity(int velocity) const noexcept;
-
-    /** True while a smoothed filter parameter is still gliding (tests / diagnostics). */
-    bool filterSmoothing() const noexcept
-    {
-        return cutoffRamp_.ramping() || resRamp_.ramping() || fenvRamp_.ramping() || keyRamp_.ramping()
-               || velCutRamp_.ramping();
-    }
     void setMasterGainLin(float g) { masterGainLin_ = g; }
 
     /** Soft-clip master bus after voice sum (tanh ceiling). */
@@ -292,20 +238,8 @@ private:
     int allocateVoice(int note, int channel);
     /** Audio thread, lock-free: current pool buffer for a sample id (snapshot pin + shared_ptr copy). */
     std::shared_ptr<const SampleBuffer> lookupBuffer(const std::string& id) const noexcept;
-    /** Per-sample smoothed filter values for one sub-block (engine-wide, shared by all voices). */
-    struct FilterMod
-    {
-        const float* cutoffHz = nullptr;   // base cutoff (before modulation)
-        const float* resonance = nullptr;  // only read when resRamping
-        const float* fenvOct = nullptr;    // filter env depth, octaves
-        const float* keyTrack = nullptr;   // 0..1
-        const float* velOct = nullptr;     // vel->cutoff depth, octaves
-        bool resRamping = false;
-    };
     void renderVoice(Voice& v, float* left, float* right, int numSamples, bool modulateCutoff,
-                     float envAmt, float baseCutoff, const FilterMod* mod) noexcept;
-    /** Fill the per-sample smoothed values for n samples; returns nullptr when nothing new is active. */
-    const FilterMod* prepareFilterMod(int n) noexcept;
+                     float envAmt, float baseCutoff) noexcept;
     /** Hermite read of a streamed voice at v.readPos (preload / ring / underrun fade). */
     void readStreamed(Voice& v, float& outL, float& outR) noexcept;
     void endVoiceStream(Voice& v) noexcept;
@@ -335,15 +269,7 @@ private:
     std::atomic<uint64_t> underruns_ { 0 };
     std::atomic<int> streamingVoices_ { 0 };
     AmpEnv::Params envParams_;
-    AmpEnv::Params fenvParams_;
-    VelocityParams velParams_;
     FilterParams filterParams_;
-    // Smoothed filter values (ParamRamp: exact target once settled). Cutoff ramps in log2(Hz).
-    ParamRamp cutoffRamp_, resRamp_, fenvRamp_, keyRamp_, velCutRamp_;
-    bool filterRampsPrimed_ = false;
-    bool newModWasActive_ = false;
-    std::array<float, kSubBlock> modCutoff_ {}, modRes_ {}, modFenv_ {}, modKey_ {}, modVel_ {};
-    FilterMod filterMod_;
     float masterGainLin_ = 1.0f;
     bool masterSoftClip_ = false;
     float pitchBendSemis_ = 0.0f;
@@ -377,4 +303,4 @@ private:
     uint64_t auditionSeqSeen_ = 0;     // audio thread
 };
 
-} // namespace looper
+} // namespace looper_v1

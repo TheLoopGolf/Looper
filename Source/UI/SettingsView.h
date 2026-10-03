@@ -84,6 +84,9 @@ private:
 
     // MIDI
     juce::ComboBox bendBox_, modBox_;
+    static constexpr int kBendPresets[] = { 1, 2, 3, 5, 7, 12, 24, 48 };
+    /** Show the patch's bendUp / bendDown (a preset when they match, else "+U / -D"). */
+    void refreshBendBox();
     juce::TextButton clearLearnBtn_ { "Clear MIDI learn" };
     PrefRow midiRows_[3];
     juce::Label sustainNote_;
