@@ -2,11 +2,13 @@
 #include "../Plugin/PluginProcessor.h"
 #include "../Import/ImportController.h"
 #include "Glyphs.h"
+#include "../AutoMapper/FilenameTokens.h"
+#include "../ZoneEdit/ZoneEditor.h"
 #include <algorithm>
 
 namespace looper {
 
-MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor)
+MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor), zoneEditor_ (processor)
 {
     setLookAndFeel (&lookAndFeel_);
 
@@ -59,6 +61,13 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor)
     addAndMakeVisible (dropHint_);
 
     addAndMakeVisible (zoneKeyboard_);
+    zoneKeyboard_.onZoneClicked = [this] (int zoneIndex) { selectZone (zoneIndex); };
+    zoneKeyboard_.onAudition = [this] (int zoneIndex, bool down) { processor_.auditionZone (zoneIndex, down); };
+
+    addAndMakeVisible (zoneEditor_);
+    zoneEditor_.onEdited = [this] { refreshZoneViews(); };
+    processor_.undoManager().addChangeListener (this);
+    setWantsKeyboardFocus (true);
 
     rrLabel_.setText ("ROUND ROBIN", juce::dontSendNotification);
     rrLabel_.setFont (juce::Font (juce::FontOptions (10.0f)));
@@ -70,13 +79,20 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor)
     rrToggle_.setTitle ("Round robin mode");
     addAndMakeVisible (rrToggle_);
 
-    samplesTitle_.setText ("SAMPLES", juce::dontSendNotification);
+    samplesTitle_.setText ("ZONES", juce::dontSendNotification);
     samplesTitle_.setFont (juce::Font (juce::FontOptions (11.0f)));
     samplesTitle_.setColour (juce::Label::textColourId, Palette::muted());
     addAndMakeVisible (samplesTitle_);
 
-    sampleModel_.names = &sampleNames_;
-    sampleList_.setModel (&sampleModel_);
+    zoneModel_.rows = &zoneRows_;
+    zoneModel_.onSelect = [this] (int row) {
+        if (syncingSelection_)
+            return;
+        selectZone (juce::isPositiveAndBelow (row, (int) zoneRows_.size()) ? zoneRows_[(size_t) row].zoneIndex : -1);
+    };
+    sampleList_.setModel (&zoneModel_);
+    sampleList_.setRowHeight (22);
+    sampleList_.setTitle ("Zones");
     sampleList_.setColour (juce::ListBox::backgroundColourId, Palette::bgSunken());
     sampleList_.setColour (juce::ListBox::outlineColourId, Palette::border());
     addAndMakeVisible (sampleList_);
@@ -123,6 +139,7 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor)
 
 MainView::~MainView()
 {
+    processor_.undoManager().removeChangeListener (this);
     sampleList_.setModel (nullptr);
     setLookAndFeel (nullptr);
 }
@@ -158,9 +175,179 @@ void MainView::styleKnob (juce::Slider& s, juce::Label& label, const juce::Strin
 void MainView::syncZoneKeyboard()
 {
     if (processor_.hasUserInstrument())
+    {
         zoneKeyboard_.setZones (processor_.getZoneKeySpans());
+        zoneKeyboard_.fitKeyRangeToRoots();
+        zoneKeyboard_.setSelectedZone (selectedZone_);
+    }
     else
         zoneKeyboard_.clearZones();
+}
+
+juce::String MainView::noteName (int midi) const
+{
+    return juce::String (midiToNoteName (midi, processor_.sessionPrefs().middleCIsC4));
+}
+
+std::array<int, 5> MainView::zoneColumns (int width)
+{
+    // name | root | keys | vel | rr  (x offsets); name takes the slack
+    const int rr = width - 34;
+    const int vel = rr - 58;
+    const int keys = vel - 84;
+    const int root = keys - 46;
+    return { 8, root, keys, vel, rr };
+}
+
+void MainView::ZoneListModel::paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected)
+{
+    if (rows == nullptr || ! juce::isPositiveAndBelow (row, (int) rows->size()))
+        return;
+    const auto& r = (*rows)[(size_t) row];
+    if (selected)
+        g.fillAll (Palette::fairwayDim().withAlpha (0.45f));
+    else if (row % 2 == 0)
+        g.fillAll (Palette::bgRaised().withAlpha (0.35f));
+    const auto cols = zoneColumns (w);
+    g.setFont (juce::Font (juce::FontOptions (12.5f)));
+    int nameX = cols[0];
+    if (r.edited)
+    {
+        g.setColour (Palette::sand());
+        g.fillEllipse ((float) nameX, (float) h * 0.5f - 3.0f, 6.0f, 6.0f);
+    }
+    nameX += 10;
+    g.setColour (r.missing ? Palette::danger() : Palette::text());
+    const int nameRight = cols[1] - (r.overlap ? 18 : 6);
+    g.drawText ((r.missing ? "[missing] " : "") + r.name, nameX, 0, nameRight - nameX, h,
+                juce::Justification::centredLeft, true);
+    if (r.overlap)
+    {
+        g.setColour (Palette::sand());
+        g.setFont (juce::Font (juce::FontOptions (12.5f, juce::Font::bold)));
+        g.drawText ("!", cols[1] - 16, 0, 10, h, juce::Justification::centred, false);
+        g.setFont (juce::Font (juce::FontOptions (12.5f)));
+    }
+    g.setColour (Palette::text());
+    g.drawText (r.root, cols[1], 0, cols[2] - cols[1] - 4, h, juce::Justification::centredLeft, false);
+    g.setColour (Palette::muted());
+    g.drawText (r.keys, cols[2], 0, cols[3] - cols[2] - 4, h, juce::Justification::centredLeft, true);
+    g.drawText (r.vel, cols[3], 0, cols[4] - cols[3] - 4, h, juce::Justification::centredLeft, false);
+    g.drawText (r.rr, cols[4], 0, w - cols[4] - 4, h, juce::Justification::centredLeft, false);
+}
+
+void MainView::rebuildZoneRows()
+{
+    zoneRows_.clear();
+    if (! processor_.hasUserInstrument())
+        return;
+    const auto map = processor_.copyInstrumentMap();
+    const auto& offline = processor_.offlineSampleIds();
+    for (size_t i = 0; i < map.zones.size(); ++i)
+    {
+        const auto& z = map.zones[i];
+        ZoneRow row;
+        row.zoneIndex = (int) i;
+        const auto* ref = processor_.findSampleRef (z.sampleId);
+        const std::string& label = ref != nullptr ? (ref->displayName.empty() ? ref->path : ref->displayName) : z.sampleId;
+        row.name = glyph::utf8 (label.c_str());
+        row.root = noteName (z.rootKey);
+        row.keys = z.keyLow == z.keyHigh ? noteName (z.keyLow) : noteName (z.keyLow) + glyph::enDash() + noteName (z.keyHigh);
+        row.vel = juce::String (z.velLow) + glyph::enDash() + juce::String (z.velHigh);
+        row.rr = z.rrGroup > 0 ? "#" + juce::String (z.rrIndex) : juce::String ("-");
+        row.missing = std::find (offline.begin(), offline.end(), z.sampleId) != offline.end();
+        row.edited = isZoneEditedFromAuto (z);
+        row.overlap = ! findOverlaps (map, i).empty();
+        zoneRows_.push_back (std::move (row));
+    }
+    // Keyboard order: low key, velocity layer, RR alternate, then map order
+    std::stable_sort (zoneRows_.begin(), zoneRows_.end(), [&map] (const ZoneRow& a, const ZoneRow& b) {
+        const auto& za = map.zones[(size_t) a.zoneIndex];
+        const auto& zb = map.zones[(size_t) b.zoneIndex];
+        if (za.keyLow != zb.keyLow) return za.keyLow < zb.keyLow;
+        if (za.velLow != zb.velLow) return za.velLow < zb.velLow;
+        return za.rrIndex < zb.rrIndex;
+    });
+}
+
+void MainView::selectZone (int zoneIndex)
+{
+    const auto map = processor_.copyInstrumentMap();
+    if (! processor_.hasUserInstrument() || ! juce::isPositiveAndBelow (zoneIndex, (int) map.zones.size()))
+        zoneIndex = -1;
+    selectedZone_ = zoneIndex;
+    selectedSampleId_ = zoneIndex >= 0 ? map.zones[(size_t) zoneIndex].sampleId : std::string();
+    zoneKeyboard_.setSelectedZone (zoneIndex);
+    zoneEditor_.setSelectedZone (zoneIndex);
+
+    const juce::ScopedValueSetter<bool> guard (syncingSelection_, true);
+    int row = -1;
+    for (size_t r = 0; r < zoneRows_.size(); ++r)
+        if (zoneRows_[r].zoneIndex == zoneIndex)
+            row = (int) r;
+    if (row >= 0)
+    {
+        sampleList_.selectRow (row, false, true);
+    }
+    else
+        sampleList_.deselectAllRows();
+}
+
+void MainView::updateStatus()
+{
+    if (! processor_.hasUserInstrument())
+    {
+        status_.setText ({}, juce::dontSendNotification);
+        return;
+    }
+    juce::String st;
+    const auto dot = glyph::dotSep();
+    st << processor_.patchName() << dot << processor_.zoneCount() << " zones" << dot
+       << processor_.rootCount() << " roots";
+    const int rr = processor_.rrDepth();
+    if (rr > 0)
+        st << dot << "RR x " << rr;
+    if (processor_.isPatchDirty())
+        st << dot << "unsaved";
+    status_.setText (st, juce::dontSendNotification);
+}
+
+void MainView::refreshZoneViews()
+{
+    rebuildZoneRows();
+    sampleList_.updateContent();
+    sampleList_.repaint();
+    syncZoneKeyboard();
+    updateStatus();
+    selectZone (selectedZone_);
+}
+
+void MainView::changeListenerCallback (juce::ChangeBroadcaster*)
+{
+    // UndoManager changed (perform / undo / redo / history cleared)
+    refreshZoneViews();
+}
+
+bool MainView::keyPressed (const juce::KeyPress& key)
+{
+    const auto mods = key.getModifiers();
+    if (! mods.isCommandDown() || ! processor_.hasUserInstrument())
+        return false;
+    const auto code = juce::CharacterFunctions::toUpperCase ((juce::juce_wchar) key.getKeyCode());
+    if (code == 'Z')
+    {
+        if (mods.isShiftDown())
+            zoneEditor_.redo();
+        else
+            zoneEditor_.undo();
+        return true;
+    }
+    if (code == 'Y')
+    {
+        zoneEditor_.redo();
+        return true;
+    }
+    return false;
 }
 
 void MainView::refreshFromProcessor()
@@ -178,32 +365,16 @@ void MainView::refreshFromProcessor()
         saveBtn_.setEnabled (true);
         samplesTitle_.setVisible (true);
         sampleList_.setVisible (true);
-        juce::String st;
+        updateStatus();
         const auto dot = glyph::dotSep();
-        st << processor_.patchName() << dot << processor_.zoneCount() << " zones" << dot
-           << processor_.rootCount() << " roots";
         const int rr = processor_.rrDepth();
-        if (rr > 0)
-            st << dot << "RR x " << rr;
-        if (processor_.isPatchDirty())
-            st << dot << "unsaved";
-        status_.setText (st, juce::dontSendNotification);
         const int missing = (int) processor_.offlineSampleIds().size();
         missingBanner_.setVisible (missing > 0);
         missingBanner_.setButtonText (juce::String (missing) + (missing == 1 ? " sample missing" : " samples missing")
                                       + dot + "Relocate" + glyph::ellipsis());
-        sampleNames_.clear();
-        for (const auto& ref : processor_.userSampleRefs())
-        {
-            juce::String name = ref.displayName.empty() ? ref.path : ref.displayName;
-            const bool offline = std::find (processor_.offlineSampleIds().begin(),
-                                            processor_.offlineSampleIds().end(),
-                                            ref.id) != processor_.offlineSampleIds().end();
-            if (offline)
-                name = "[missing] " + name;
-            sampleNames_.add (name);
-        }
+        rebuildZoneRows();
         sampleList_.updateContent();
+        zoneEditor_.setVisible (true);
 
         rrLabel_.setVisible (true);
         rrToggle_.setVisible (true);
@@ -232,10 +403,26 @@ void MainView::refreshFromProcessor()
         missingBanner_.setVisible (false);
         rrLabel_.setVisible (false);
         rrToggle_.setVisible (false);
-        sampleNames_.clear();
+        zoneEditor_.setVisible (false);
+        zoneRows_.clear();
         sampleList_.updateContent();
     }
+    // Keep the selection on the same sample when the map was replaced (import / patch load)
+    int keep = -1;
+    if (loaded && ! selectedSampleId_.empty())
+    {
+        const auto map = processor_.copyInstrumentMap();
+        if (juce::isPositiveAndBelow (selectedZone_, (int) map.zones.size())
+            && map.zones[(size_t) selectedZone_].sampleId == selectedSampleId_)
+            keep = selectedZone_;
+        else
+            for (size_t i = 0; i < map.zones.size() && keep < 0; ++i)
+                if (map.zones[i].sampleId == selectedSampleId_)
+                    keep = (int) i;
+    }
+    selectedZone_ = keep;
     syncZoneKeyboard();
+    selectZone (keep);
     resized();
     repaint();
 }
@@ -312,6 +499,21 @@ void MainView::paint (juce::Graphics& g)
         g.fillRoundedRectangle (samplesCard, 10.0f);
         g.setColour (Palette::border());
         g.drawRoundedRectangle (samplesCard, 10.0f, 1.0f);
+
+        if (! listHeaderArea_.isEmpty())
+        {
+            const auto cols = zoneColumns (listHeaderArea_.getWidth());
+            g.setColour (Palette::muted());
+            g.setFont (juce::Font (juce::FontOptions (9.5f)));
+            const char* captions[] = { "SAMPLE", "ROOT", "KEYS", "VEL", "RR" };
+            for (size_t c = 0; c < cols.size(); ++c)
+            {
+                const int x0 = listHeaderArea_.getX() + cols[c] + (c == 0 ? 10 : 0);
+                const int x1 = c + 1 < cols.size() ? listHeaderArea_.getX() + cols[c + 1] : listHeaderArea_.getRight();
+                g.drawText (captions[c], x0, listHeaderArea_.getY(), x1 - x0, listHeaderArea_.getHeight(),
+                            juce::Justification::centredLeft, false);
+            }
+        }
     }
 
     // Performance deck card
@@ -380,6 +582,8 @@ void MainView::resized()
         sampleList_.setBounds ({});
         rrLabel_.setBounds ({});
         rrToggle_.setBounds ({});
+        zoneEditor_.setBounds ({});
+        listHeaderArea_ = {};
     }
     else
     {
@@ -403,12 +607,18 @@ void MainView::resized()
         mid.removeFromTop (8);
         zoneKeyboard_.setBounds (mid.removeFromTop (88).reduced (8));
         // SAMPLES card header: title left, round-robin segmented control right
-        auto samplesHeader = mid.removeFromTop (34).withTrimmedTop (8).reduced (12, 1);
-        rrToggle_.setBounds (samplesHeader.removeFromRight (148));
-        samplesHeader.removeFromRight (8);
-        rrLabel_.setBounds (samplesHeader.removeFromRight (90));
+        // Left: ZONES list (+ RR mode); right: zone editor
+        auto card = mid.reduced (0, 4);
+        auto editorArea = card.removeFromRight (juce::jmax (420, card.getWidth() * 54 / 100));
+        zoneEditor_.setBounds (editorArea.reduced (0, 4));
+        auto samplesHeader = card.removeFromTop (30).withTrimmedTop (6).reduced (12, 1);
+        rrToggle_.setBounds (samplesHeader.removeFromRight (130));
+        samplesHeader.removeFromRight (6);
+        rrLabel_.setBounds (samplesHeader.removeFromRight (82));
         samplesTitle_.setBounds (samplesHeader);
-        sampleList_.setBounds (mid.reduced (10, 6));
+        auto listArea = card.reduced (10, 4);
+        listHeaderArea_ = listArea.removeFromTop (14);
+        sampleList_.setBounds (listArea);
         dropHint_.setBounds ({});
     }
 }

@@ -522,6 +522,23 @@ void writeZone(JsonWriter& w, const Zone& z)
     w.numberVal(z.pan);
     writeOptionalInt64(w, "sampleStart", z.sampleStart);
     writeOptionalInt64(w, "sampleEnd", z.sampleEnd);
+    // AutoMapper's original values ("Reset to auto"); additive, ignored by older readers.
+    if (z.autoValues)
+    {
+        const auto& a = *z.autoValues;
+        w.key("auto");
+        w.beginObject();
+        w.key("rootKey");   w.intVal(a.rootKey);
+        w.key("keyLow");    w.intVal(a.keyLow);
+        w.key("keyHigh");   w.intVal(a.keyHigh);
+        w.key("velLow");    w.intVal(a.velLow);
+        w.key("velHigh");   w.intVal(a.velHigh);
+        w.key("rrGroup");   w.intVal(a.rrGroup);
+        w.key("rrIndex");   w.intVal(a.rrIndex);
+        w.key("tuneCents"); w.numberVal(a.tuneCents);
+        w.key("gainDb");    w.numberVal(a.gainDb);
+        w.endObject();
+    }
     w.endObject();
 }
 
@@ -593,6 +610,24 @@ Zone readZone(const JsonValue& v)
     if (auto* x = v.find("pan")) if (auto n = x->asNumber()) z.pan = static_cast<float>(*n);
     if (auto* x = v.find("sampleStart")) if (auto n = x->asInt64()) z.sampleStart = *n;
     if (auto* x = v.find("sampleEnd")) if (auto n = x->asInt64()) z.sampleEnd = *n;
+    if (auto* a = v.find("auto"); a && a->type == JsonValue::Type::Object)
+    {
+        // Defaults = the zone's own values, so a partial "auto" object stays sensible.
+        ZoneAutoValues av;
+        av.rootKey = z.rootKey; av.keyLow = z.keyLow; av.keyHigh = z.keyHigh;
+        av.velLow = z.velLow; av.velHigh = z.velHigh; av.rrGroup = z.rrGroup; av.rrIndex = z.rrIndex;
+        av.tuneCents = z.tuneCents; av.gainDb = z.gainDb;
+        if (auto* x = a->find("rootKey")) if (auto n = x->asInt()) av.rootKey = *n;
+        if (auto* x = a->find("keyLow")) if (auto n = x->asInt()) av.keyLow = *n;
+        if (auto* x = a->find("keyHigh")) if (auto n = x->asInt()) av.keyHigh = *n;
+        if (auto* x = a->find("velLow")) if (auto n = x->asInt()) av.velLow = *n;
+        if (auto* x = a->find("velHigh")) if (auto n = x->asInt()) av.velHigh = *n;
+        if (auto* x = a->find("rrGroup")) if (auto n = x->asInt()) av.rrGroup = *n;
+        if (auto* x = a->find("rrIndex")) if (auto n = x->asInt()) av.rrIndex = *n;
+        if (auto* x = a->find("tuneCents")) if (auto n = x->asNumber()) av.tuneCents = static_cast<float>(*n);
+        if (auto* x = a->find("gainDb")) if (auto n = x->asNumber()) av.gainDb = static_cast<float>(*n);
+        z.autoValues = av;
+    }
     return z;
 }
 

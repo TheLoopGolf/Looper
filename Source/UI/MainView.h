@@ -6,13 +6,19 @@
 #include "LooperControls.h"
 #include "LooperLookAndFeel.h"
 #include "ZoneKeyboardComponent.h"
+#include "ZoneEditorPanel.h"
+#include <array>
 #include <functional>
+#include <string>
+#include <vector>
 
 class LooperAudioProcessor;
 
 namespace looper {
 
-class MainView : public juce::Component, public juce::FileDragAndDropTarget
+class MainView : public juce::Component,
+                 public juce::FileDragAndDropTarget,
+                 private juce::ChangeListener
 {
 public:
     using ImportFn = std::function<void(const juce::Array<juce::File>&)>;
@@ -39,7 +45,20 @@ public:
     void setRelocateCallback (RelocateFn fn) { onRelocate_ = std::move (fn); }
     void refreshFromProcessor();
 
+    /** Select a zone (index into the processor's map; -1 = none) in list, strip and editor. */
+    void selectZone (int zoneIndex);
+    int selectedZone() const noexcept { return selectedZone_; }
+
+    /** Cmd/Ctrl+Z undo, Shift+Cmd/Ctrl+Z (or Ctrl+Y) redo for zone edits. */
+    bool keyPressed (const juce::KeyPress& key) override;
+
 private:
+    void changeListenerCallback (juce::ChangeBroadcaster*) override;
+    /** Rebuild zone rows, strip, status and editor after an edit / undo / redo. */
+    void refreshZoneViews();
+    void rebuildZoneRows();
+    void updateStatus();
+    juce::String noteName (int midi) const;
     void styleKnob (juce::Slider& s, juce::Label& label, const juce::String& name);
     void styleSecondaryButton (juce::TextButton& b);
     void styleBrassButton (juce::TextButton& b);
@@ -72,25 +91,31 @@ private:
 
     ZoneKeyboardComponent zoneKeyboard_;
 
-    juce::StringArray sampleNames_;
-    struct SampleModel : public juce::ListBoxModel
+    ZoneEditorPanel zoneEditor_;
+    int selectedZone_ = -1;
+    std::string selectedSampleId_;
+    bool syncingSelection_ = false;
+
+    /** One row per zone (keyboard order) in the ZONES list. */
+    struct ZoneRow
     {
-        juce::StringArray* names = nullptr;
-        int getNumRows() override { return names != nullptr ? names->size() : 0; }
-        void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override
-        {
-            if (names == nullptr || ! juce::isPositiveAndBelow (row, names->size()))
-                return;
-            if (selected)
-                g.fillAll (Palette::fairwayDim().withAlpha (0.45f));
-            else if (row % 2 == 0)
-                g.fillAll (Palette::bgRaised().withAlpha (0.35f));
-            g.setColour (Palette::text());
-            g.setFont (juce::Font (juce::FontOptions (13.0f)));
-            g.drawText ((*names)[row], 8, 0, w - 12, h, juce::Justification::centredLeft, true);
-        }
-    } sampleModel_;
+        int zoneIndex = -1;
+        juce::String name, root, keys, vel, rr;
+        bool missing = false, edited = false, overlap = false;
+    };
+    std::vector<ZoneRow> zoneRows_;
+    /** Column x offsets shared by the list rows and the header captions. */
+    static std::array<int, 5> zoneColumns (int width);
+    struct ZoneListModel : public juce::ListBoxModel
+    {
+        std::vector<ZoneRow>* rows = nullptr;
+        std::function<void (int row)> onSelect;
+        int getNumRows() override { return rows != nullptr ? (int) rows->size() : 0; }
+        void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override;
+        void selectedRowsChanged (int lastRowSelected) override { if (onSelect) onSelect (lastRowSelected); }
+    } zoneModel_;
     juce::ListBox sampleList_;
+    juce::Rectangle<int> listHeaderArea_;
 
     juce::Slider vol_, atk_, dec_, sus_, rel_, cut_, res_, env_;
     juce::Label volL_, atkL_, decL_, susL_, relL_, cutL_, resL_, envL_;

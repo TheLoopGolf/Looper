@@ -142,6 +142,14 @@ void LooperLookAndFeel::drawButtonBackground (juce::Graphics& g, juce::Button& b
             outline = Palette::brass();
     }
 
+    if (! button.isEnabled())
+    {
+        // Disabled: primary buttons fade to a dim outline chip so they read as unavailable
+        if (primary && ! ghost)
+            fill = Palette::fairwayDim().withAlpha (0.18f);
+        outline = outline.withMultipliedAlpha (0.45f);
+    }
+
     g.setColour (fill);
     g.fillRoundedRectangle (bounds, radius);
     g.setColour (outline);
@@ -158,9 +166,12 @@ void LooperLookAndFeel::drawButtonText (juce::Graphics& g, juce::TextButton& but
                                                                : juce::TextButton::buttonColourId);
     const bool primary = bg.getPerceivedBrightness() > 0.35f
                          || bg.getGreen() > bg.getRed() + 20;
-    g.setColour (primary ? Palette::bg()
-                         : button.findColour (juce::TextButton::textColourOffId)
-                               .withMultipliedAlpha (button.isEnabled() ? 1.0f : 0.45f));
+    if (primary && ! button.isEnabled())
+        g.setColour (Palette::text().withAlpha (0.45f));
+    else
+        g.setColour (primary ? Palette::bg()
+                             : button.findColour (juce::TextButton::textColourOffId)
+                                   .withMultipliedAlpha (button.isEnabled() ? 1.0f : 0.45f));
 
     g.drawText (button.getButtonText(), button.getLocalBounds().reduced (4, 0),
                 juce::Justification::centred, false);

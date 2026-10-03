@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "../Import/MapCommit.h"
+#include "../ZoneEdit/ZoneEditAction.h"
 
 #include <algorithm>
 
@@ -121,7 +122,7 @@ std::vector<looper::ZoneKeySpan> LooperAudioProcessor::getZoneKeySpans() const
     std::vector<looper::ZoneKeySpan> out;
     out.reserve(map_.zones.size());
     for (const auto& z : map_.zones)
-        out.push_back({ z.keyLow, z.keyHigh });
+        out.push_back({ z.keyLow, z.keyHigh, z.rootKey });
     return out;
 }
 
@@ -157,6 +158,7 @@ bool LooperAudioProcessor::acceptPendingMap()
     importController_.storeLastReview(*pending, userSampleRefs_);
     importController_.clearPending();
     swapPlayableMap(std::move(next));
+    undoManager_.clearUndoHistory(); // zone indices of the old map are meaningless now
     hasUserInstrument_.store(true);
     demoLoaded_ = false;
     if (patchName_.isEmpty() || patchName_ == "Untitled")
@@ -288,6 +290,9 @@ void LooperAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     juce::ScopedNoDenormals noDenormals;
     buffer.clear();
     syncParamsToEngine();
+    voiceEngine_.applyPendingMapUpdate();  // live zone edits, before this block's note-ons
+    // Zone-editor audition notes from the UI join the host MIDI
+    auditionState_.processNextMidiBuffer(midi, 0, buffer.getNumSamples(), true);
     for (const auto metadata : midi)
     {
         const auto msg = metadata.getMessage();
@@ -396,6 +401,7 @@ bool LooperAudioProcessor::applyPatch(const Patch& patch, juce::StringArray* mis
 
     userSampleRefs_ = std::move(loadedRefs);
     swapPlayableMap(patch.map);
+    undoManager_.clearUndoHistory();
     hasUserInstrument_.store(!patch.map.zones.empty());
     demoLoaded_ = false;
     patchName_ = juce::String(patch.name.empty() ? "Untitled" : patch.name);
@@ -479,6 +485,62 @@ bool LooperAudioProcessor::relocateSample(const std::string& sampleId, const juc
                             offlineSampleIds_.end());
     patchDirty_ = true;
     return true;
+}
+
+bool LooperAudioProcessor::performZoneEdit(size_t index, const looper::Zone& proposed,
+                                           const juce::String& actionName, bool newTransaction)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    auto edit = looper::makeZoneEdit(copyInstrumentMap(), index, proposed);
+    if (! edit)
+        return false;
+    if (newTransaction)
+        undoManager_.beginNewTransaction(actionName);
+    return undoManager_.perform(new looper::ZoneEditAction(*this, std::move(*edit)));
+}
+
+bool LooperAudioProcessor::replaceZone(size_t index, const std::string& sampleId, const looper::Zone& zone)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    // Copy + edit outside the lock; the lock only covers O(1) swaps.
+    auto next = std::make_shared<InstrumentMap>(copyInstrumentMap());
+    if (! looper::replaceZoneInMap(*next, index, sampleId, zone))
+        return false;
+    InstrumentMap retired = *next;
+    {
+        std::lock_guard<std::mutex> lock(mapMutex_);
+        std::swap(map_, retired);
+        mapShared_ = next;
+    }
+    voiceEngine_.updateMapLive(next); // audio thread adopts it next block; sounding voices follow
+    patchDirty_ = true;
+    return true;
+}
+
+const SampleRef* LooperAudioProcessor::findSampleRef(const std::string& sampleId) const
+{
+    const auto it = std::find_if(userSampleRefs_.begin(), userSampleRefs_.end(),
+                                 [&](const SampleRef& r) { return r.id == sampleId; });
+    return it != userSampleRefs_.end() ? &*it : nullptr;
+}
+
+void LooperAudioProcessor::auditionZone(int zoneIndex, bool down)
+{
+    constexpr int kAuditionChannel = 1;
+    if (auditionNote_ >= 0)
+    {
+        auditionState_.noteOff(kAuditionChannel, auditionNote_, 0.0f);
+        auditionNote_ = -1;
+    }
+    if (! down)
+        return;
+    const auto map = copyInstrumentMap();
+    if (! juce::isPositiveAndBelow(zoneIndex, (int) map.zones.size()))
+        return;
+    int note = 60, velocity = 100;
+    looper::auditionNoteFor(map.zones[(size_t) zoneIndex], note, velocity);
+    auditionState_.noteOn(kAuditionChannel, note, (float) velocity / 127.0f);
+    auditionNote_ = note;
 }
 
 looper::RoundRobinMode LooperAudioProcessor::currentRoundRobinMode() const

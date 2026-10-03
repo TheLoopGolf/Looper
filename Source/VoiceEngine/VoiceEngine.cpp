@@ -178,9 +178,81 @@ void VoiceEngine::setMap(const InstrumentMap* map)
 
 void VoiceEngine::adoptMap(std::shared_ptr<const InstrumentMap> map)
 {
+    {
+        // A wholesale swap supersedes any queued live edit.
+        std::lock_guard<std::mutex> lock(pendingMutex_);
+        pendingMapReady_.store(false, std::memory_order_release);
+        pendingMap_.reset();
+    }
     map_ = map.get();
     mapHold_ = std::move(map);
     clearRrCounters();
+}
+
+void VoiceEngine::updateMapLive(std::shared_ptr<const InstrumentMap> map)
+{
+    if (!map)
+        return;
+    std::lock_guard<std::mutex> lock(pendingMutex_);
+    pendingMap_ = std::move(map); // drops a previously queued (or retired) map here, off the audio thread
+    pendingMapReady_.store(true, std::memory_order_release);
+}
+
+bool VoiceEngine::applyPendingMapUpdate() noexcept
+{
+    if (!pendingMapReady_.load(std::memory_order_acquire))
+        return false;
+    std::unique_lock<std::mutex> lock(pendingMutex_, std::try_to_lock);
+    if (!lock.owns_lock())
+        return false; // message thread is queueing; pick it up next block
+    if (!pendingMapReady_.load(std::memory_order_relaxed) || !pendingMap_)
+        return false;
+    const size_t oldCount = map_ != nullptr ? map_->zones.size() : 0;
+    // Swap so the old map is parked in pendingMap_ and freed by the message thread later.
+    std::swap(mapHold_, pendingMap_);
+    map_ = mapHold_.get();
+    pendingMapReady_.store(false, std::memory_order_relaxed);
+    lock.unlock();
+
+    if (map_ == nullptr || map_->zones.size() != oldCount)
+        clearRrCounters();
+    refreshVoicesFromMap();
+    return true;
+}
+
+void VoiceEngine::refreshVoicesFromMap() noexcept
+{
+    if (map_ == nullptr)
+        return;
+    const auto& zones = map_->zones;
+    for (auto& v : voices_)
+    {
+        if (!v.active || v.zoneIndex < 0 || static_cast<size_t>(v.zoneIndex) >= zones.size())
+            continue;
+        const Zone& z = zones[static_cast<size_t>(v.zoneIndex)];
+        if (z.sampleId != v.zone.sampleId)
+            continue;
+        const bool pitchChanged = z.rootKey != v.zone.rootKey || z.tuneCents != v.zone.tuneCents
+                                  || z.coarseTranspose != v.zone.coarseTranspose;
+        v.zone.rootKey = z.rootKey;
+        v.zone.tuneCents = z.tuneCents;
+        v.zone.coarseTranspose = z.coarseTranspose;
+        v.zone.pan = z.pan;
+        if (z.gainDb != v.zone.gainDb)
+        {
+            v.zone.gainDb = z.gainDb;
+            v.zoneGainLin = dbToLin(z.gainDb);
+        }
+        // Key / velocity / RR fields only matter at note-on; keep the voice's copy in sync.
+        v.zone.keyLow = z.keyLow;
+        v.zone.keyHigh = z.keyHigh;
+        v.zone.velLow = z.velLow;
+        v.zone.velHigh = z.velHigh;
+        v.zone.rrGroup = z.rrGroup;
+        v.zone.rrIndex = z.rrIndex;
+        if (pitchChanged)
+            updateVoicePitchRatio(v);
+    }
 }
 
 void VoiceEngine::mapChanged()
@@ -395,10 +467,11 @@ int VoiceEngine::allocateVoice(int note, int channel)
 }
 
 void VoiceEngine::startVoice(int voiceIndex, int note, int velocity, int channel, const Zone& zone,
-                             std::shared_ptr<const SampleBuffer> buffer)
+                             std::shared_ptr<const SampleBuffer> buffer, int zoneIndex)
 {
     auto& v = voices_[static_cast<size_t>(voiceIndex)];
     v.active = true;
+    v.zoneIndex = zoneIndex;
     v.note = note;
     v.velocity = velocity;
     v.channel = channel;
@@ -445,10 +518,12 @@ void VoiceEngine::noteOn(int note, int velocity, int channel)
 
     Zone zone;
     std::shared_ptr<const SampleBuffer> buffer;
+    int zoneIndex = -1;
 
     if (const Zone* z = selectZone(note, velocity))
     {
         zone = *z;
+        zoneIndex = static_cast<int>(z - map_->zones.data());
         if (pool_)
             buffer = pool_->getBuffer(zone.sampleId);
         // Offline zone (sample file missing, awaiting relocation): stay silent rather
@@ -460,6 +535,7 @@ void VoiceEngine::noteOn(int note, int velocity, int channel)
     // Fallback: demo sample at root 60 when no map/zones match
     if (!buffer)
     {
+        zoneIndex = -1;
         zone = makeDemoZone();
         zone.rootKey = 60;
         if (pool_)
@@ -475,7 +551,7 @@ void VoiceEngine::noteOn(int note, int velocity, int channel)
         return;
 
     const int idx = allocateVoice(note, channel);
-    startVoice(idx, note, velocity, channel, zone, std::move(buffer));
+    startVoice(idx, note, velocity, channel, zone, std::move(buffer), zoneIndex);
 }
 
 void VoiceEngine::noteOff(int note, int channel)
@@ -543,6 +619,8 @@ void VoiceEngine::allNotesOff()
 
 void VoiceEngine::processBlock(float* left, float* right, int numSamples)
 {
+    applyPendingMapUpdate();
+
     for (int i = 0; i < numSamples; ++i)
     {
         left[i] = 0.0f;

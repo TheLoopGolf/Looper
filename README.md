@@ -38,8 +38,11 @@ Source/
   MidiRouter/       Note/CC + pitch bend (±2 st); CC1 → cutoff when target FilterCutoff
   PatchStore/       JSON sidecar (.looper.json) — relative sample paths, schema v1;
                     SampleRelocator (find moved/missing samples, no JUCE)
-  UI/               MainView (drop/loaded), ReviewMapView (table), SettingsView, RelocateView;
+  UI/               MainView (drop/loaded, ZONES list), ZoneEditorPanel, ZoneKeyboardComponent (clickable
+                    strip), ReviewMapView (table), SettingsView, RelocateView;
                     LooperControls (segmented control, vector gear), Glyphs.h (all non-ASCII UI text)
+  ZoneEdit/         ZoneEditor (clamp / no-inversion / overlaps / auto + detected actions / undoable
+                    edit records, no JUCE) + ZoneEditAction (juce::UndoableAction wrapper)
   Prefs/            SessionPrefs (global/session settings JSON)
   Import/           ImportController + MapCommit (message-thread pipeline)
   Plugin/           PluginProcessor + PluginEditor (APVTS ADSR/Volume/Filter)
@@ -54,10 +57,13 @@ Tests/
   PitchMappingTests.cpp drum-key spread (order / skips / shared layers), filename-vs-audio mismatch,
                     C3=60 naming, pitch metadata in .looper.json (round trip + old patches), prefs
   SourceEncodingTests.cpp mojibake guard: no raw non-ASCII literals; UI text only via Glyphs.h
+  ZoneEditorTests.cpp field edits + clamping, no inverted ranges, overlap warnings, Reset to auto /
+                    Use detected, .looper.json round trip, live voice updates (no audio-thread alloc),
+                    audition note, juce::UndoManager undo/redo + drag coalescing (when built with JUCE)
 docs/               Product, DSP, wireframes
 ```
 
-Libraries: `LooperAutoMapper` (filename map), `LooperDsp` (Hermite/AmpEnv/SamplePool/VoiceEngine/SVF, **no JUCE**), `LooperPatch` (JSON patch IO + SessionPrefs + SampleRelocator, **no JUCE**). Plugin links all three.
+Libraries: `LooperAutoMapper` (filename map), `LooperDsp` (Hermite/AmpEnv/SamplePool/VoiceEngine/SVF, **no JUCE**), `LooperPatch` (JSON patch IO + SessionPrefs + SampleRelocator, **no JUCE**), `LooperZoneEdit` (zone editor rules, **no JUCE**). Plugin links all four.
 
 ### Automatic pitch detection
 
@@ -118,7 +124,8 @@ Every imported sample is analysed on import (cached per sample) with
 | Drag-drop import → AutoMapper → Review → Accept | **Done** |
 | MainView empty/loaded + ReviewMapView table | **Done** |
 | Settings (Engine / Mapping / MIDI / Files / About) | **Done** |
-| Keyboard strip graphic | TODO (polish) |
+| Keyboard strip graphic | **Done** — zones, root dots, selection; click to select / audition |
+| Manual zone editor (root, keys, velocity, tune, gain, RR) + undo/redo | **Done** — see below |
 | Relocate missing samples (search folder / locate / cascade) | **Done** — see below |
 
 ---
@@ -136,18 +143,32 @@ Every imported sample is analysed on import (cached per sample) with
 2. Import runs on the **message thread** (decode → `SamplePool` → `AutoMapper`).
 3. **Review map** opens with Sample / Source / Root / Vel / RR / Key span / Confidence.
 4. Click **Accept map** to commit zones into the playable `InstrumentMap`, or **Back to play** to discard.
-5. After Accept, the main view shows zone/root counts, sample list, **Review map** (re-open last result), and **+ Samples**.
+5. After Accept, the main view shows zone/root counts, the **ZONES** list + zone editor, **Review map** (re-open last result), and **+ Samples**.
 
 Host-automatable params: **Attack / Decay / Sustain / Release / Volume / Filter Type / Cutoff / Resonance / Filter Env Amt / Round Robin**.
 
 ### Round-robin mode (Cycle / Random)
 
-Zones that share a note, a velocity layer and a non-zero `rrGroup` are round-robin alternates. The **ROUND ROBIN `Cycle | Random`** switch sits in the header of the **SAMPLES** card on the main view (also *Settings → Mapping → Round-robin mode*, and the host parameter **Round Robin**):
+Zones that share a note, a velocity layer and a non-zero `rrGroup` are round-robin alternates. The **ROUND ROBIN `Cycle | Random`** switch sits in the header of the **ZONES** card on the main view (also *Settings → Mapping → Round-robin mode*, and the host parameter **Round Robin**):
 
 - **Cycle** (default, unchanged v1 behaviour): alternates play in `rrIndex` order, wrapping around; one counter per `rrGroup`.
 - **Random**: a uniformly random alternate each hit, **never the same one twice in a row** when the group has 2+ alternates (a single alternate just plays). The "last played" memory is per keyzone / velocity-layer group.
 - Real-time safe: PCG32 generator (`Source/VoiceEngine/FastRng.h`), fixed-size per-group state table and stack scratch, so zone selection never allocates or locks on the audio thread (verified by `RoundRobinTests` with a counting `operator new`). Each plugin instance seeds itself differently; tests seed explicitly.
 - Saved per patch as `map.roundRobinMode` (`"cycle"` / `"random"`) in `.looper.json` and in host state. Older patches without the field load as **Cycle**. The switch is dimmed (still usable) when the patch has no RR alternates.
+
+### Edit zones by hand (main view)
+
+After an import is accepted (or a patch is opened) the main view's lower card is split: the **ZONES** list on the left (one row per zone: sample, root, key range, velocity range, RR alternate; a sand dot marks zones edited since auto-map, a sand **!** marks overlaps) and the **zone editor** on the right. Select a zone by clicking a row, or by clicking a key inside the zone on the **keyboard strip** above (repeated clicks on a key cycle through stacked zones; the selected zone is outlined in sand and every zone's root key carries a dot).
+
+- **Fields:** Root key, Fine tune (cents), Gain (dB), Low/High key, RR group (0 = off), Low/High velocity, RR alternate. Drag a bar (relative, a click never jumps), use the mouse wheel, or click to type (notes like `E3` or MIDI numbers). Note labels follow *Settings → Mapping → Middle C* (C4 = 60 / C3 = 60).
+- **Validation:** keys and root clamp to 0–127, velocities to 1–127, fine tune to ±100 ct, gain to −48…+24 dB. Ranges never invert: dragging a low edge past the high edge pushes the high edge along (and vice versa). Overlaps with other zones are **warned, not blocked** ("! Overlaps 1 zone: Pluck.wav · first match plays"); round-robin alternates in the same group are not reported.
+- **Use detected pitch:** when the sample has a stored detection, sets root to the detected note and fine tune to −(detected cents), e.g. a pluck 15 ct sharp on E3 → root E3, −15.0 ct. Disabled when already in use or no detection exists (drums, old patches).
+- **Reset to auto:** restores every editable field to what AutoMapper chose at import. Zones store that snapshot as `"auto": {…}` in `.looper.json`; patches saved before the zone editor have no snapshot, so the button stays disabled for them.
+- **Audition:** click a zone's root key on the strip (dot), or hold **Audition**, to hear exactly that zone (root key clamped into its key range, velocity 100 clamped into its layer).
+- **Undo / Redo:** **Cmd/Ctrl+Z**, **Shift+Cmd/Ctrl+Z** (or Ctrl+Y), or the editor's Undo/Redo buttons (`juce::UndoManager`, ~200 steps). A whole slider drag is one undo step. History is cleared when a new import is accepted or a patch is loaded.
+- **Live + saved:** edits apply to playback immediately — the edited map is handed to the audio thread lock-free (try-lock at block start; the old map is freed on the message thread) and voices already sounding that zone follow root / fine tune / gain changes; key, velocity and RR changes apply from the next note. Every edit marks the patch **unsaved**; **Save** writes the zones to `.looper.json`.
+
+Rules live in `Source/ZoneEdit/ZoneEditor.*` (no JUCE) and are covered by `ZoneEditorTests`; see `docs/zone-editor.md`.
 
 ### Save / Load patch (Standalone or plugin UI)
 
@@ -156,7 +177,7 @@ Zones that share a note, a velocity layer and a non-zero `rrGroup` are round-rob
 3. Click **Open…** (available even on the empty drop screen) → pick a `.looper.json` / `.json`. Samples are decoded on the message thread into `SamplePool`; if any sample files are missing the patch still loads (those zones stay **silent**) and the **Relocate** screen opens.
 4. Host project save/recall (`getStateInformation` / `setStateInformation`) embeds APVTS + a patch JSON blob. If sample paths from the previous session are still valid, buffers reload; otherwise the zones stay silent and the main view shows a **“N samples missing · Relocate…”** banner.
 
-**Format sketch (schemaVersion 1):** `name`, `patchRoot`, `samples[]` (`id`, `path`, …), `map` (globals incl. optional `roundRobinMode` + `zones[]`), optional `params` (APVTS float snapshot).
+**Format sketch (schemaVersion 1):** `name`, `patchRoot`, `samples[]` (`id`, `path`, …), `map` (globals incl. optional `roundRobinMode` + `zones[]`, each zone with an optional `auto` snapshot for Reset to auto), optional `params` (APVTS float snapshot).
 
 ### Relocate missing samples
 
@@ -181,7 +202,7 @@ JUCE is pulled via **CMake FetchContent** (not vendored). Requires CMake ≥ 3.2
 cmake -S . -B build -DLOOPER_BUILD_PLUGIN=OFF -DLOOPER_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
-# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/PitchMappingTests && ./build/SourceEncodingTests
+# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/PitchMappingTests && ./build/SourceEncodingTests && ./build/ZoneEditorTests
 ```
 
 ### Full plugin (macOS / Windows recommended)
@@ -221,7 +242,7 @@ Session prefs persist in host state (`prefsJson` alongside patch). Mapping optio
 
 **Done:** drop/browse import → AutoMapper → Review map → Accept into playable map; APVTS knobs; thread-safe map swap via `shared_ptr`/`adoptMap`; Settings screen with session prefs.
 
-**Polish TODOs:** keyboard strip graphic, glide/portamento DSP, sustain pedal, MIDI learn.
+**Polish TODOs:** glide/portamento DSP polish, sustain pedal, MIDI learn, zone drag-resizing on the strip.
 
 ## Next milestone
 
@@ -229,8 +250,8 @@ Streaming sample I/O → optional dedicated filter envelope.
 
 ## Contributing / next steps
 
-1. Keyboard strip zone visualization per wireframes.
-2. Per-row manual root-key editing in Review (beyond "Use detected").
+1. Zone editor: drag zone edges / roots directly on the keyboard strip; multi-zone selection; zone gain smoothing.
+2. Per-row manual root-key editing in Review (beyond "Use detected"); the main-view zone editor covers it after Accept.
 3. Relocate: optional file-hash verification of candidates.
 4. Parameter smoothing on continuous filter/env params; finish glide DSP.
 5. Choose LICENSE compatible with your JUCE license (GPL vs commercial).

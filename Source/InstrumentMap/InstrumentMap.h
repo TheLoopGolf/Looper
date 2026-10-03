@@ -43,6 +43,25 @@ struct SampleRef
     std::optional<int64_t> loopEnd;
 };
 
+/**
+ * The editable zone fields exactly as AutoMapper produced them at import ("Reset to auto").
+ * Stored per zone in .looper.json under "auto"; absent for pre-zone-editor patches.
+ */
+struct ZoneAutoValues
+{
+    int rootKey = 60;
+    int keyLow = 0;
+    int keyHigh = 127;
+    int velLow = 1;
+    int velHigh = 127;
+    int rrGroup = 0;
+    int rrIndex = 0;
+    float tuneCents = 0.0f;
+    float gainDb = 0.0f;
+
+    bool operator==(const ZoneAutoValues&) const = default;
+};
+
 struct Zone
 {
     std::string sampleId;
@@ -59,6 +78,8 @@ struct Zone
     float pan = 0.0f;
     std::optional<int64_t> sampleStart;
     std::optional<int64_t> sampleEnd;
+    /** AutoMapper's original values (set when an import is accepted); see ZoneEditor. */
+    std::optional<ZoneAutoValues> autoValues;
 
     bool matchesNoteVelocity(int note, int velocity) const
     {
@@ -71,6 +92,7 @@ struct ZoneKeySpan
 {
     int low = 0;
     int high = 127;
+    int root = -1;   // -1 = unknown (no root marker drawn)
 };
 
 enum class VelCurve

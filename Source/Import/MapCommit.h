@@ -2,6 +2,7 @@
 
 #include "../AutoMapper/AutoMapper.h"
 #include "../InstrumentMap/InstrumentMap.h"
+#include "../ZoneEdit/ZoneEditor.h"
 
 #include <algorithm>
 #include <set>
@@ -11,6 +12,7 @@ namespace looper {
 inline void commitAutoMapToInstrument(InstrumentMap& dest, const AutoMapResult& result)
 {
     dest.zones = result.map.zones;
+    stampAutoValues(dest); // remembered for the zone editor's "Reset to auto"
     if (dest.polyphonyLimit <= 0)
         dest.polyphonyLimit = 64;
 }

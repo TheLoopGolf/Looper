@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -32,6 +33,8 @@ struct Voice
     float velocityAmp = 1.0f;
     float zoneGainLin = 1.0f;
     Zone zone;
+    /** Index of `zone` in the map it was picked from (-1 = demo fallback); live edits use it. */
+    int zoneIndex = -1;
     std::shared_ptr<const SampleBuffer> buffer;
     AmpEnv ampEnv;
     SvfFilter filter; // dual-state stereo SVF
@@ -73,6 +76,19 @@ public:
      * Prefer this over setMap when replacing maps from the UI / import path.
      */
     void adoptMap(std::shared_ptr<const InstrumentMap> map);
+
+    /**
+     * Live zone edit (message thread): queue a map whose zones are the current ones with edited
+     * fields (same zone order). The audio thread adopts it at the start of the next processBlock
+     * (try-lock, never blocks; the replaced map is released later on the message thread) and
+     * pushes root key / fine tune / transpose / gain / pan into voices that are already sounding
+     * those zones. Key / velocity / RR changes affect the next note-on. RR counters are kept
+     * unless the zone count changed.
+     */
+    void updateMapLive(std::shared_ptr<const InstrumentMap> map);
+
+    /** Audio thread (called by processBlock): adopt a queued live map. True if one was applied. */
+    bool applyPendingMapUpdate() noexcept;
 
     /** Call when map zones changed in-place (same pointer). Clears RR counters. */
     void mapChanged();
@@ -145,7 +161,8 @@ public:
 private:
     int allocateVoice(int note, int channel);
     void startVoice(int voiceIndex, int note, int velocity, int channel, const Zone& zone,
-                    std::shared_ptr<const SampleBuffer> buffer);
+                    std::shared_ptr<const SampleBuffer> buffer, int zoneIndex = -1);
+    void refreshVoicesFromMap() noexcept;
     void updateVoicePitchRatio(Voice& v) const;
     void applyFilterGlobals(Voice& v) const;
     double computePitchRatio(int note, const Zone& zone) const;
@@ -158,6 +175,10 @@ private:
     std::vector<Voice> voices_;
     const InstrumentMap* map_ = nullptr;
     std::shared_ptr<const InstrumentMap> mapHold_;
+    // Live-edit hand-off (updateMapLive -> applyPendingMapUpdate)
+    std::mutex pendingMutex_;
+    std::shared_ptr<const InstrumentMap> pendingMap_;
+    std::atomic<bool> pendingMapReady_ { false };
     SamplePool* pool_ = nullptr;
     AmpEnv::Params envParams_;
     FilterParams filterParams_;

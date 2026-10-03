@@ -10,6 +10,7 @@
 #include "../PatchStore/SampleRelocator.h"
 #include "../Prefs/SessionPrefs.h"
 #include "../VoiceEngine/VoiceEngine.h"
+#include "../ZoneEdit/ZoneEditor.h"
 
 #include <atomic>
 #include <memory>
@@ -27,7 +28,8 @@ using looper::PatchStore;
 using looper::SessionPrefs;
 using looper::VoiceEngine;
 
-class LooperAudioProcessor : public juce::AudioProcessor
+class LooperAudioProcessor : public juce::AudioProcessor,
+                             public looper::ZoneEditTarget
 {
 public:
     LooperAudioProcessor();
@@ -117,6 +119,27 @@ public:
     /** Message thread: set "rrMode" (notifies host; saved with the patch). */
     void setRoundRobinMode(looper::RoundRobinMode mode);
 
+    // --- Manual zone editor (main screen) ----------------------------------------------
+    /** Undo history for zone edits (cleared when an import is accepted or a patch is loaded). */
+    juce::UndoManager& undoManager() { return undoManager_; }
+
+    /**
+     * Message thread: make zones[index] equal `proposed` (sanitized) as an undoable action.
+     * newTransaction = false merges into the current transaction (slider drag in progress).
+     * Applies live to playback, marks the patch unsaved. False if nothing changed / stale index.
+     */
+    bool performZoneEdit(size_t index, const looper::Zone& proposed, const juce::String& actionName,
+                         bool newTransaction = true);
+
+    /** ZoneEditTarget: swap the edited zone into the live map (used by undo/redo too). */
+    bool replaceZone(size_t index, const std::string& sampleId, const looper::Zone& zone) override;
+
+    /** Message thread: sample metadata for a zone's sample id (nullptr if unknown). */
+    const SampleRef* findSampleRef(const std::string& sampleId) const;
+
+    /** Message thread: hold (down = true) / release the selected zone's audition note. */
+    void auditionZone(int zoneIndex, bool down);
+
     const SessionPrefs& sessionPrefs() const { return prefs_; }
     /** Apply prefs to engine / map / APVTS defaults and remember for persistence. */
     void applySessionPrefs(const SessionPrefs& prefs);
@@ -147,6 +170,10 @@ private:
     juce::String patchName_ { "Untitled" };
     std::vector<std::string> offlineSampleIds_;
     bool patchDirty_ = false;
+
+    juce::UndoManager undoManager_ { 0, 200 };  // zone edits only; ~200 transactions kept
+    juce::MidiKeyboardState auditionState_;     // UI audition notes -> processBlock MIDI
+    int auditionNote_ = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LooperAudioProcessor)
 };

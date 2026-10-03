@@ -55,13 +55,25 @@ target_compile_features(LooperPatch PUBLIC cxx_std_20)
 set_target_properties(LooperPatch PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ---------------------------------------------------------------------------
+# Zone editor model (no JUCE — clamp / overlap / auto values / undoable edits)
+# ---------------------------------------------------------------------------
+add_library(LooperZoneEdit STATIC
+    Source/ZoneEdit/ZoneEditor.cpp
+)
+target_include_directories(LooperZoneEdit PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/Source
+)
+target_compile_features(LooperZoneEdit PUBLIC cxx_std_20)
+set_target_properties(LooperZoneEdit PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# ---------------------------------------------------------------------------
 # Unit tests (no plugin host required)
 # ---------------------------------------------------------------------------
 if(LOOPER_BUILD_TESTS)
     enable_testing()
 
     add_executable(AutoMapperTests Tests/AutoMapperTests.cpp)
-    target_link_libraries(AutoMapperTests PRIVATE LooperAutoMapper)
+    target_link_libraries(AutoMapperTests PRIVATE LooperAutoMapper LooperZoneEdit)
     add_test(NAME AutoMapperTests COMMAND AutoMapperTests)
 
     add_executable(PitchDetectorTests Tests/PitchDetectorTests.cpp)
@@ -173,6 +185,10 @@ if(LOOPER_BUILD_PLUGIN)
             Source/MidiRouter/MidiRouter.h
             Source/PatchStore/PatchStore.h
             Source/PatchStore/SampleRelocator.h
+            Source/ZoneEdit/ZoneEditor.h
+            Source/ZoneEdit/ZoneEditAction.h
+            Source/UI/ZoneEditorPanel.cpp
+            Source/UI/ZoneEditorPanel.h
     )
 
     target_include_directories(Looper
@@ -193,6 +209,7 @@ if(LOOPER_BUILD_PLUGIN)
             LooperAutoMapper
             LooperDsp
             LooperPatch
+            LooperZoneEdit
             juce::juce_audio_utils
             juce::juce_audio_processors
             juce::juce_audio_formats
@@ -204,4 +221,26 @@ if(LOOPER_BUILD_PLUGIN)
             juce::juce_recommended_lto_flags
             juce::juce_recommended_warning_flags
     )
+endif()
+
+# ---------------------------------------------------------------------------
+# Zone editor tests: edits, clamping, overlaps, auto/detected actions, persistence,
+# live voice updates. With JUCE available (LOOPER_BUILD_PLUGIN) the same suite also
+# drives the real juce::UndoManager + ZoneEditAction undo/redo path.
+# ---------------------------------------------------------------------------
+if(LOOPER_BUILD_TESTS)
+    add_executable(ZoneEditorTests Tests/ZoneEditorTests.cpp)
+    target_link_libraries(ZoneEditorTests PRIVATE LooperZoneEdit LooperDsp LooperPatch)
+    if(LOOPER_BUILD_PLUGIN)
+        target_link_libraries(ZoneEditorTests PRIVATE
+            juce::juce_data_structures
+            juce::juce_recommended_config_flags)
+        target_compile_definitions(ZoneEditorTests PRIVATE
+            LOOPER_ZONE_EDIT_WITH_JUCE=1
+            JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+            JUCE_STANDALONE_APPLICATION=1
+            JUCE_USE_CURL=0
+            JUCE_WEB_BROWSER=0)
+    endif()
+    add_test(NAME ZoneEditorTests COMMAND ZoneEditorTests)
 endif()
