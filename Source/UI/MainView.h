@@ -47,7 +47,12 @@ public:
 
     /** Select a zone (index into the processor's map; -1 = none) in list, strip and editor. */
     void selectZone (int zoneIndex);
-    int selectedZone() const noexcept { return selectedZone_; }
+    /** Primary selected zone, or -1. */
+    int selectedZone() const noexcept { return selection_.primary(); }
+
+    /** Multi-selection (list Shift/Cmd-click, strip Shift/Cmd-click, Cmd/Ctrl+A in the list). */
+    void setSelection (const ZoneSelection& selection);
+    const ZoneSelection& selection() const noexcept { return selection_; }
 
     /** Cmd/Ctrl+Z undo, Shift+Cmd/Ctrl+Z (or Ctrl+Y) redo for zone edits. */
     bool keyPressed (const juce::KeyPress& key) override;
@@ -66,6 +71,15 @@ private:
     void openPatchChooser();
     void savePatchChooser();
     void syncZoneKeyboard();
+    /** Push selection_ to strip, list and editor (pruned to the current map). */
+    void applySelection();
+    /** Zone indices in list (keyboard) order, for Shift-click ranges. */
+    std::vector<size_t> displayOrder() const;
+    void onListSelectionChanged (int lastRowSelected);
+    // Keyboard strip drags (one undo step each)
+    bool beginStripDrag (StripPart part, int zoneIndex, int anchorKey);
+    juce::String moveStripDrag (int key);
+    void endStripDrag();
 
     LooperAudioProcessor& processor_;
     ImportFn onImport_;
@@ -92,9 +106,15 @@ private:
     ZoneKeyboardComponent zoneKeyboard_;
 
     ZoneEditorPanel zoneEditor_;
-    int selectedZone_ = -1;
-    std::string selectedSampleId_;
+    ZoneSelection selection_;
+    std::string selectedSampleId_;   // primary's sample: keeps the selection across map swaps
     bool syncingSelection_ = false;
+
+    // Strip drag in progress
+    StripPart dragPart_ = StripPart::None;
+    int dragAnchorKey_ = -1;
+    InstrumentMap dragOrigin_;
+    bool dragTransactionOpen_ = false;
 
     /** One row per zone (keyboard order) in the ZONES list. */
     struct ZoneRow
@@ -113,6 +133,7 @@ private:
         int getNumRows() override { return rows != nullptr ? (int) rows->size() : 0; }
         void paintListBoxItem (int row, juce::Graphics& g, int w, int h, bool selected) override;
         void selectedRowsChanged (int lastRowSelected) override { if (onSelect) onSelect (lastRowSelected); }
+        void deleteKeyPressed (int) override {}
     } zoneModel_;
     juce::ListBox sampleList_;
     juce::Rectangle<int> listHeaderArea_;

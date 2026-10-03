@@ -32,17 +32,21 @@ Source/
   AutoMapper/       Filename parse + zone building + YIN pitch detection (PitchDetector)
   InstrumentMap/    Zone, SampleRef, InstrumentMap types
   SamplePool/       RAM SampleBuffer pool + demo tone generator
-  VoiceEngine/      Polyphony, steal, Hermite + AmpEnv + SVF; vel layers + RR (Cycle / Random, FastRng)
+  VoiceEngine/      Polyphony, steal, Hermite + AmpEnv + SVF; vel layers + RR (Cycle / Random, FastRng);
+                    GainRamp (20 ms zone-gain glide), exact-zone audition (lock-free request)
   AmpEnv/           Linear ADSR (min attack 0.1 ms)
   Filter/           Linear Simper SVF (LP/HP/BP, dual-state stereo)
   MidiRouter/       Note/CC + pitch bend (±2 st); CC1 → cutoff when target FilterCutoff
   PatchStore/       JSON sidecar (.looper.json) — relative sample paths, schema v1;
                     SampleRelocator (find moved/missing samples, no JUCE)
-  UI/               MainView (drop/loaded, ZONES list), ZoneEditorPanel, ZoneKeyboardComponent (clickable
-                    strip), ReviewMapView (table), SettingsView, RelocateView;
+  UI/               MainView (drop/loaded, ZONES list, multi-select), ZoneEditorPanel (mixed values),
+                    ZoneKeyboardComponent (drag edges / root / body, Alt-draw), ReviewMapView (table),
+                    SettingsView, RelocateView;
                     LooperControls (segmented control, vector gear), Glyphs.h (all non-ASCII UI text)
   ZoneEdit/         ZoneEditor (clamp / no-inversion / overlaps / auto + detected actions / undoable
-                    edit records, no JUCE) + ZoneEditAction (juce::UndoableAction wrapper)
+                    edit records), ZoneSelection (multi-select + relative/absolute group edits),
+                    ZoneStrip (strip geometry, hit-test, snap, drag maths), EditHistory (saved-state
+                    tracking), all no JUCE; ZoneEditAction (juce::UndoableAction, single or group)
   Prefs/            SessionPrefs (global/session settings JSON)
   Import/           ImportController + MapCommit (message-thread pipeline)
   Plugin/           PluginProcessor + PluginEditor (APVTS ADSR/Volume/Filter)
@@ -60,10 +64,14 @@ Tests/
   ZoneEditorTests.cpp field edits + clamping, no inverted ranges, overlap warnings, Reset to auto /
                     Use detected, .looper.json round trip, live voice updates (no audio-thread alloc),
                     audition note, juce::UndoManager undo/redo + drag coalescing (when built with JUCE)
+  ZoneStripTests.cpp strip geometry / snapping / hit-test, drag maths (edges, root, body, Alt-draw,
+                    clamping, no inversion), selection rules, mixed values, relative / absolute group
+                    edits, all-or-nothing group records, saved-state tracking, gain ramp (no step,
+                    no alloc), exact-zone audition, one-undo-step grouping on juce::UndoManager
 docs/               Product, DSP, wireframes
 ```
 
-Libraries: `LooperAutoMapper` (filename map), `LooperDsp` (Hermite/AmpEnv/SamplePool/VoiceEngine/SVF, **no JUCE**), `LooperPatch` (JSON patch IO + SessionPrefs + SampleRelocator, **no JUCE**), `LooperZoneEdit` (zone editor rules, **no JUCE**). Plugin links all four.
+Libraries: `LooperAutoMapper` (filename map), `LooperDsp` (Hermite/AmpEnv/SamplePool/VoiceEngine/SVF, **no JUCE**), `LooperPatch` (JSON patch IO + SessionPrefs + SampleRelocator, **no JUCE**), `LooperZoneEdit` (zone editor rules, selection, strip maths, **no JUCE**; links `LooperAutoMapper` for note names). Plugin links all four.
 
 ### Automatic pitch detection
 
@@ -124,8 +132,9 @@ Every imported sample is analysed on import (cached per sample) with
 | Drag-drop import → AutoMapper → Review → Accept | **Done** |
 | MainView empty/loaded + ReviewMapView table | **Done** |
 | Settings (Engine / Mapping / MIDI / Files / About) | **Done** |
-| Keyboard strip graphic | **Done** — zones, root dots, selection; click to select / audition |
+| Keyboard strip graphic | **Done** — zones, root dots, selection; click to select / audition; drag edges / root / body, Alt-draw |
 | Manual zone editor (root, keys, velocity, tune, gain, RR) + undo/redo | **Done** — see below |
+| Multi-zone selection + relative / absolute group edits | **Done** — see below |
 | Relocate missing samples (search folder / locate / cascade) | **Done** — see below |
 
 ---
@@ -158,17 +167,28 @@ Zones that share a note, a velocity layer and a non-zero `rrGroup` are round-rob
 
 ### Edit zones by hand (main view)
 
-After an import is accepted (or a patch is opened) the main view's lower card is split: the **ZONES** list on the left (one row per zone: sample, root, key range, velocity range, RR alternate; a sand dot marks zones edited since auto-map, a sand **!** marks overlaps) and the **zone editor** on the right. Select a zone by clicking a row, or by clicking a key inside the zone on the **keyboard strip** above (repeated clicks on a key cycle through stacked zones; the selected zone is outlined in sand and every zone's root key carries a dot).
+After an import is accepted (or a patch is opened) the main view's lower card is split: the **ZONES** list on the left (one row per zone: sample, root, key range, velocity range, RR alternate; a sand dot marks zones edited since auto-map, a sand **!** marks overlaps) and the **zone editor** on the right, under the **keyboard strip**.
 
-- **Fields:** Root key, Fine tune (cents), Gain (dB), Low/High key, RR group (0 = off), Low/High velocity, RR alternate. Drag a bar (relative, a click never jumps), use the mouse wheel, or click to type (notes like `E3` or MIDI numbers). Note labels follow *Settings → Mapping → Middle C* (C4 = 60 / C3 = 60).
-- **Validation:** keys and root clamp to 0–127, velocities to 1–127, fine tune to ±100 ct, gain to −48…+24 dB. Ranges never invert: dragging a low edge past the high edge pushes the high edge along (and vice versa). Overlaps with other zones are **warned, not blocked** ("! Overlaps 1 zone: Pluck.wav · first match plays"); round-robin alternates in the same group are not reported.
+**Selecting.** Click a list row or a zone on the strip. **Cmd-click** (macOS) / **Ctrl-click** (Windows/Linux) adds or removes a zone, **Shift-click** selects a range in keyboard order; both work in the list and on the strip. **Cmd/Ctrl+A** selects every zone while the list has keyboard focus. Repeated plain clicks on one key of the strip cycle through stacked zones (velocity layers, RR alternates). Selected zones are outlined in sand with brass edge grips; the zone you clicked last is the *primary* (thicker outline, larger root dot).
+
+**Editing on the strip** (every drag snaps to keys, shows a live tooltip such as `Low F#3 · F#3–E4`, and is **one undo step**):
+- Drag a zone's **left / right edge** to change its low / high key (cursor turns into a resize arrow).
+- Drag its **root dot** to move the root key.
+- Drag its **body** to move the whole zone; the width is kept and the root moves with it.
+- **Alt/Option-drag** anywhere on the strip to draw a key range for the selected zone(s).
+- With several zones selected, the same drag moves every selected zone by the same number of keys (a body move is clamped for the whole group so nothing changes width; Alt-draw gives them all the drawn range).
+- Same rules as the editor: 0–127, ranges never invert (an edge pushed past the other drags it along), overlaps warned not blocked. Note names follow *Settings → Mapping → Middle C* (C4 = 60 / C3 = 60). Drags are computed from the zones as they were at mouse-down, so dragging back restores them exactly.
+
+**Editor fields:** Root key, Fine tune (cents), Gain (dB), Low/High key, RR group (0 = off), Low/High velocity, RR alternate. Drag a bar (relative, a click never jumps), use the mouse wheel, or click to type (notes like `E3` or MIDI numbers).
+- **Several zones selected:** the title reads "3 zones selected"; fields whose values differ show `mixed  C3–C5` in sand. Dragging / scrolling Root, Low/High key, Fine tune or Gain **offsets every zone from its own value** (fine tune +5 ct, gain +2 dB, keys +N); velocity and RR fields are **set absolutely** for all. Typing `+3` / `-3` offsets, a plain value (or `=-6` for a negative absolute) sets every zone. **SHIFT KEYS** buttons (−12 / −1 / +1 / +12) move key ranges and roots together. **Use detected pitch** and **Reset to auto** apply to each selected zone. Each action is one undo step.
+- **Validation:** keys and root clamp to 0–127, velocities to 1–127, fine tune to ±100 ct, gain to −48…+24 dB. Ranges never invert. Overlaps with other zones are **warned, not blocked** ("! Overlaps 1 zone: Pluck.wav · first match plays"); round-robin alternates in the same group are not reported.
 - **Use detected pitch:** when the sample has a stored detection, sets root to the detected note and fine tune to −(detected cents), e.g. a pluck 15 ct sharp on E3 → root E3, −15.0 ct. Disabled when already in use or no detection exists (drums, old patches).
 - **Reset to auto:** restores every editable field to what AutoMapper chose at import. Zones store that snapshot as `"auto": {…}` in `.looper.json`; patches saved before the zone editor have no snapshot, so the button stays disabled for them.
-- **Audition:** click a zone's root key on the strip (dot), or hold **Audition**, to hear exactly that zone (root key clamped into its key range, velocity 100 clamped into its layer).
-- **Undo / Redo:** **Cmd/Ctrl+Z**, **Shift+Cmd/Ctrl+Z** (or Ctrl+Y), or the editor's Undo/Redo buttons (`juce::UndoManager`, ~200 steps). A whole slider drag is one undo step. History is cleared when a new import is accepted or a patch is loaded.
-- **Live + saved:** edits apply to playback immediately — the edited map is handed to the audio thread lock-free (try-lock at block start; the old map is freed on the message thread) and voices already sounding that zone follow root / fine tune / gain changes; key, velocity and RR changes apply from the next note. Every edit marks the patch **unsaved**; **Save** writes the zones to `.looper.json`.
+- **Audition:** click a zone's root key on the strip, or hold **Audition** (primary zone), to hear **exactly that zone** — the request goes straight to the voice engine with the zone index, bypassing key/velocity matching, overlapping zones and round-robin (the RR position is not advanced). Root key clamped into the zone's key range, velocity 100 clamped into its layer.
+- **Undo / Redo:** **Cmd/Ctrl+Z**, **Shift+Cmd/Ctrl+Z** (or Ctrl+Y), or the Undo/Redo buttons (`juce::UndoManager`, ~200 steps). A whole slider or strip drag is one undo step, and so is every multi-zone edit. History is cleared when a new import is accepted or a patch is loaded.
+- **Live + saved:** edits apply to playback immediately — the edited map is handed to the audio thread lock-free (try-lock at block start; the old map is freed on the message thread; a multi-zone edit is one hand-off) and voices already sounding that zone follow root / fine tune / gain changes. **Gain changes glide over ~20 ms** (`GainRamp`, per-sample linear ramp, allocation-free) so they never click; key, velocity and RR changes apply from the next note. Edits mark the patch **unsaved**; undoing back to the last saved (or loaded) state clears the marker again (redo past it sets it). Non-undoable changes (accepting an import, relinking a sample) stay unsaved until **Save**.
 
-Rules live in `Source/ZoneEdit/ZoneEditor.*` (no JUCE) and are covered by `ZoneEditorTests`; see `docs/zone-editor.md`.
+Rules live in `Source/ZoneEdit/` (no JUCE) and are covered by `ZoneEditorTests` and `ZoneStripTests`; see `docs/zone-editor.md`.
 
 ### Save / Load patch (Standalone or plugin UI)
 
@@ -202,7 +222,7 @@ JUCE is pulled via **CMake FetchContent** (not vendored). Requires CMake ≥ 3.2
 cmake -S . -B build -DLOOPER_BUILD_PLUGIN=OFF -DLOOPER_BUILD_TESTS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
-# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/PitchMappingTests && ./build/SourceEncodingTests && ./build/ZoneEditorTests
+# or: ./build/AutoMapperTests && ./build/PitchDetectorTests && ./build/DspVoiceTests && ./build/PatchStoreTests && ./build/SessionPrefsTests && ./build/RelocatorTests && ./build/RoundRobinTests && ./build/PitchMappingTests && ./build/SourceEncodingTests && ./build/ZoneEditorTests && ./build/ZoneStripTests
 ```
 
 ### Full plugin (macOS / Windows recommended)
@@ -242,7 +262,7 @@ Session prefs persist in host state (`prefsJson` alongside patch). Mapping optio
 
 **Done:** drop/browse import → AutoMapper → Review map → Accept into playable map; APVTS knobs; thread-safe map swap via `shared_ptr`/`adoptMap`; Settings screen with session prefs.
 
-**Polish TODOs:** glide/portamento DSP polish, sustain pedal, MIDI learn, zone drag-resizing on the strip.
+**Polish TODOs:** glide/portamento DSP polish, sustain pedal, MIDI learn, velocity-range dragging (a velocity × key grid).
 
 ## Next milestone
 
@@ -250,7 +270,7 @@ Streaming sample I/O → optional dedicated filter envelope.
 
 ## Contributing / next steps
 
-1. Zone editor: drag zone edges / roots directly on the keyboard strip; multi-zone selection; zone gain smoothing.
+1. Zone editor: velocity × key grid view (drag velocity ranges too); zoom / scroll for the strip.
 2. Per-row manual root-key editing in Review (beyond "Use detected"); the main-view zone editor covers it after Accept.
 3. Relocate: optional file-hash verification of candidates.
 4. Parameter smoothing on continuous filter/env params; finish glide DSP.

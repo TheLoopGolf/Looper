@@ -297,6 +297,42 @@ bool applyZoneEdit(InstrumentMap& map, const ZoneEdit& edit, bool forward)
     return replaceZoneInMap(map, edit.index, edit.sampleId, forward ? edit.after : edit.before);
 }
 
+std::vector<ZoneEdit> makeZoneEdits(const InstrumentMap& map, const std::vector<ZoneChange>& changes)
+{
+    std::vector<ZoneEdit> out;
+    out.reserve(changes.size());
+    for (const auto& c : changes)
+    {
+        if (c.index >= map.zones.size() || map.zones[c.index].sampleId != c.zone.sampleId)
+            return {};
+        // A zone listed twice: the later proposal wins, measured against the original zone.
+        auto dup = std::find_if(out.begin(), out.end(), [&](const ZoneEdit& e) { return e.index == c.index; });
+        if (dup != out.end())
+            out.erase(dup);
+        if (auto e = makeZoneEdit(map, c.index, c.zone))
+            out.push_back(std::move(*e));
+    }
+    return out;
+}
+
+bool applyZoneEdits(InstrumentMap& map, const std::vector<ZoneEdit>& edits, bool forward)
+{
+    for (const auto& e : edits)
+        if (e.index >= map.zones.size() || map.zones[e.index].sampleId != e.sampleId)
+            return false;
+    if (forward)
+    {
+        for (const auto& e : edits)
+            map.zones[e.index] = e.after;
+    }
+    else
+    {
+        for (auto it = edits.rbegin(); it != edits.rend(); ++it)
+            map.zones[it->index] = it->before;
+    }
+    return true;
+}
+
 void auditionNoteFor(const Zone& zone, int& noteOut, int& velocityOut)
 {
     Zone z = zone;

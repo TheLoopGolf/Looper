@@ -61,8 +61,17 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor), z
     addAndMakeVisible (dropHint_);
 
     addAndMakeVisible (zoneKeyboard_);
-    zoneKeyboard_.onZoneClicked = [this] (int zoneIndex) { selectZone (zoneIndex); };
+    zoneKeyboard_.onZoneClicked = [this] (int zoneIndex, ClickModifier mod) {
+        if (zoneIndex < 0)
+            return;
+        auto next = selection_;
+        applySelectionClick (next, (size_t) zoneIndex, mod, displayOrder());
+        setSelection (next);
+    };
     zoneKeyboard_.onAudition = [this] (int zoneIndex, bool down) { processor_.auditionZone (zoneIndex, down); };
+    zoneKeyboard_.onDragStart = [this] (StripPart part, int zoneIndex, int anchorKey) { return beginStripDrag (part, zoneIndex, anchorKey); };
+    zoneKeyboard_.onDragMove = [this] (int key) { return moveStripDrag (key); };
+    zoneKeyboard_.onDragEnd = [this] { endStripDrag(); };
 
     addAndMakeVisible (zoneEditor_);
     zoneEditor_.onEdited = [this] { refreshZoneViews(); };
@@ -85,12 +94,10 @@ MainView::MainView (LooperAudioProcessor& processor) : processor_ (processor), z
     addAndMakeVisible (samplesTitle_);
 
     zoneModel_.rows = &zoneRows_;
-    zoneModel_.onSelect = [this] (int row) {
-        if (syncingSelection_)
-            return;
-        selectZone (juce::isPositiveAndBelow (row, (int) zoneRows_.size()) ? zoneRows_[(size_t) row].zoneIndex : -1);
-    };
+    zoneModel_.onSelect = [this] (int row) { onListSelectionChanged (row); };
     sampleList_.setModel (&zoneModel_);
+    sampleList_.setMultipleSelectionEnabled (true);   // Shift / Cmd(Ctrl)-click, Cmd/Ctrl+A when focused
+    sampleList_.setWantsKeyboardFocus (true);
     sampleList_.setRowHeight (22);
     sampleList_.setTitle ("Zones");
     sampleList_.setColour (juce::ListBox::backgroundColourId, Palette::bgSunken());
@@ -177,8 +184,9 @@ void MainView::syncZoneKeyboard()
     if (processor_.hasUserInstrument())
     {
         zoneKeyboard_.setZones (processor_.getZoneKeySpans());
-        zoneKeyboard_.fitKeyRangeToRoots();
-        zoneKeyboard_.setSelectedZone (selectedZone_);
+        if (! zoneKeyboard_.isDragging())   // never rescale the strip under the pointer
+            zoneKeyboard_.fitKeyRangeToRoots();
+        zoneKeyboard_.setSelection (selection_);
     }
     else
         zoneKeyboard_.clearZones();
@@ -272,25 +280,128 @@ void MainView::rebuildZoneRows()
 
 void MainView::selectZone (int zoneIndex)
 {
+    ZoneSelection next;
+    if (zoneIndex >= 0)
+        next.selectOnly ((size_t) zoneIndex);
+    setSelection (next);
+}
+
+void MainView::setSelection (const ZoneSelection& selection)
+{
+    selection_ = selection;
+    applySelection();
+}
+
+std::vector<size_t> MainView::displayOrder() const
+{
+    std::vector<size_t> order;
+    order.reserve (zoneRows_.size());
+    for (const auto& r : zoneRows_)
+        order.push_back ((size_t) r.zoneIndex);
+    return order;
+}
+
+void MainView::applySelection()
+{
     const auto map = processor_.copyInstrumentMap();
-    if (! processor_.hasUserInstrument() || ! juce::isPositiveAndBelow (zoneIndex, (int) map.zones.size()))
-        zoneIndex = -1;
-    selectedZone_ = zoneIndex;
-    selectedSampleId_ = zoneIndex >= 0 ? map.zones[(size_t) zoneIndex].sampleId : std::string();
-    zoneKeyboard_.setSelectedZone (zoneIndex);
-    zoneEditor_.setSelectedZone (zoneIndex);
+    if (! processor_.hasUserInstrument())
+        selection_.clear();
+    selection_.prune (map.zones.size());
+    const int primary = selection_.primary();
+    selectedSampleId_ = primary >= 0 ? map.zones[(size_t) primary].sampleId : std::string();
+    zoneKeyboard_.setSelection (selection_);
+    zoneEditor_.setSelection (selection_);
 
     const juce::ScopedValueSetter<bool> guard (syncingSelection_, true);
-    int row = -1;
+    juce::SparseSet<int> rows;
+    int primaryRow = -1;
     for (size_t r = 0; r < zoneRows_.size(); ++r)
-        if (zoneRows_[r].zoneIndex == zoneIndex)
-            row = (int) r;
-    if (row >= 0)
     {
-        sampleList_.selectRow (row, false, true);
+        const auto zi = (size_t) zoneRows_[r].zoneIndex;
+        if (selection_.contains (zi))
+            rows.addRange ({ (int) r, (int) r + 1 });
+        if ((int) zi == primary)
+            primaryRow = (int) r;
     }
-    else
+    if (rows.isEmpty())
         sampleList_.deselectAllRows();
+    else
+    {
+        sampleList_.setSelectedRows (rows, juce::dontSendNotification);
+        if (primaryRow >= 0)
+            sampleList_.scrollToEnsureRowIsOnscreen (primaryRow);
+    }
+    sampleList_.repaint();
+}
+
+void MainView::onListSelectionChanged (int lastRowSelected)
+{
+    if (syncingSelection_)
+        return;
+    const auto rows = sampleList_.getSelectedRows();
+    std::vector<size_t> indices;
+    for (int k = 0; k < rows.size(); ++k)
+    {
+        const int r = rows[k];
+        if (juce::isPositiveAndBelow (r, (int) zoneRows_.size()))
+            indices.push_back ((size_t) zoneRows_[(size_t) r].zoneIndex);
+    }
+    int primary = -1;
+    if (juce::isPositiveAndBelow (lastRowSelected, (int) zoneRows_.size()) && rows.contains (lastRowSelected))
+        primary = zoneRows_[(size_t) lastRowSelected].zoneIndex;
+    else if (selection_.primary() >= 0
+             && std::find (indices.begin(), indices.end(), (size_t) selection_.primary()) != indices.end())
+        primary = selection_.primary();
+    ZoneSelection next;
+    next.set (std::move (indices), primary);
+    setSelection (next);
+}
+
+bool MainView::beginStripDrag (StripPart part, int zoneIndex, int anchorKey)
+{
+    if (! processor_.hasUserInstrument())
+        return false;
+    if (zoneIndex >= 0 && ! selection_.contains ((size_t) zoneIndex))
+        return false;
+    if (zoneIndex >= 0)
+    {
+        selection_.setPrimary ((size_t) zoneIndex);   // the dragged zone leads; others follow by the same keys
+        applySelection();
+    }
+    if (selection_.empty())
+        return false;
+    dragPart_ = part;
+    dragAnchorKey_ = anchorKey;
+    dragOrigin_ = processor_.copyInstrumentMap();
+    dragTransactionOpen_ = false;
+    return true;
+}
+
+juce::String MainView::moveStripDrag (int key)
+{
+    if (dragPart_ == StripPart::None)
+        return {};
+    const auto changes = computeStripDrag (dragOrigin_, selection_, dragPart_, dragAnchorKey_, key);
+    // First change opens the transaction; the rest of the drag coalesces into it (one undo step)
+    if (processor_.performZoneEdits (changes, stripDragActionName (dragPart_, selection_.isMulti()),
+                                     ! dragTransactionOpen_))
+        dragTransactionOpen_ = true;
+    refreshZoneViews();
+    const auto map = processor_.copyInstrumentMap();
+    const int primary = selection_.primary();
+    if (! juce::isPositiveAndBelow (primary, (int) map.zones.size()))
+        return {};
+    return juce::String (juce::CharPointer_UTF8 (stripDragLabel (dragPart_, map.zones[(size_t) primary],
+                                                                  processor_.sessionPrefs().middleCIsC4,
+                                                                  selection_.size()).c_str()));
+}
+
+void MainView::endStripDrag()
+{
+    dragPart_ = StripPart::None;
+    dragTransactionOpen_ = false;
+    dragOrigin_ = {};
+    refreshZoneViews();
 }
 
 void MainView::updateStatus()
@@ -319,7 +430,7 @@ void MainView::refreshZoneViews()
     sampleList_.repaint();
     syncZoneKeyboard();
     updateStatus();
-    selectZone (selectedZone_);
+    applySelection();
 }
 
 void MainView::changeListenerCallback (juce::ChangeBroadcaster*)
@@ -407,22 +518,29 @@ void MainView::refreshFromProcessor()
         zoneRows_.clear();
         sampleList_.updateContent();
     }
-    // Keep the selection on the same sample when the map was replaced (import / patch load)
-    int keep = -1;
+    // Keep the selection when the map is unchanged in shape; after an import / patch load only
+    // the primary's sample survives (found by sample id).
     if (loaded && ! selectedSampleId_.empty())
     {
         const auto map = processor_.copyInstrumentMap();
-        if (juce::isPositiveAndBelow (selectedZone_, (int) map.zones.size())
-            && map.zones[(size_t) selectedZone_].sampleId == selectedSampleId_)
-            keep = selectedZone_;
-        else
+        const int primary = selection_.primary();
+        const bool same = juce::isPositiveAndBelow (primary, (int) map.zones.size())
+                          && map.zones[(size_t) primary].sampleId == selectedSampleId_;
+        if (! same)
+        {
+            int keep = -1;
             for (size_t i = 0; i < map.zones.size() && keep < 0; ++i)
                 if (map.zones[i].sampleId == selectedSampleId_)
                     keep = (int) i;
+            selection_.clear();
+            if (keep >= 0)
+                selection_.selectOnly ((size_t) keep);
+        }
     }
-    selectedZone_ = keep;
+    else
+        selection_.clear();
     syncZoneKeyboard();
-    selectZone (keep);
+    applySelection();
     resized();
     repaint();
 }

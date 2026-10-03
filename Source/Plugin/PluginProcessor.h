@@ -10,6 +10,7 @@
 #include "../PatchStore/SampleRelocator.h"
 #include "../Prefs/SessionPrefs.h"
 #include "../VoiceEngine/VoiceEngine.h"
+#include "../ZoneEdit/EditHistory.h"
 #include "../ZoneEdit/ZoneEditor.h"
 
 #include <atomic>
@@ -111,8 +112,13 @@ public:
      */
     bool relocateSample(const std::string& sampleId, const juce::File& newFile, juce::String* error = nullptr);
 
-    /** True when the in-memory instrument differs from the last saved/loaded patch file. */
-    bool isPatchDirty() const { return patchDirty_; }
+    /**
+     * True when the in-memory instrument differs from the last saved/loaded patch file.
+     * Follows undo/redo: undoing back to the saved state reads as clean again.
+     */
+    bool isPatchDirty() const { return editState_.isDirty(); }
+    /** Message thread: saved-state tracking (tests / diagnostics). */
+    const looper::EditStateTracker& editState() const { return editState_; }
 
     /** Round-robin mode from the host-automatable "rrMode" parameter (Cycle / Random). */
     looper::RoundRobinMode currentRoundRobinMode() const;
@@ -131,13 +137,27 @@ public:
     bool performZoneEdit(size_t index, const looper::Zone& proposed, const juce::String& actionName,
                          bool newTransaction = true);
 
+    /**
+     * Message thread: apply a group of proposed zones (multi-selection edit, strip drag) as ONE
+     * undoable action, published to playback as one live map. Unchanged zones are skipped;
+     * a stale index / sample id rejects the whole group. False if nothing changed.
+     */
+    bool performZoneEdits(const std::vector<looper::ZoneChange>& changes, const juce::String& actionName,
+                          bool newTransaction = true);
+
     /** ZoneEditTarget: swap the edited zone into the live map (used by undo/redo too). */
     bool replaceZone(size_t index, const std::string& sampleId, const looper::Zone& zone) override;
+    /** ZoneEditTarget: apply / revert a group of edits with a single live map swap. */
+    bool replaceZones(const std::vector<looper::ZoneEdit>& edits, bool forward) override;
 
     /** Message thread: sample metadata for a zone's sample id (nullptr if unknown). */
     const SampleRef* findSampleRef(const std::string& sampleId) const;
 
-    /** Message thread: hold (down = true) / release the selected zone's audition note. */
+    /**
+     * Message thread: hold (down = true) / release an audition of exactly zones[zoneIndex]
+     * (its root key, clamped into its key range, velocity 100 clamped into its layer). Plays that
+     * zone even when other zones overlap it or it belongs to a round-robin group.
+     */
     void auditionZone(int zoneIndex, bool down);
 
     const SessionPrefs& sessionPrefs() const { return prefs_; }
@@ -169,11 +189,10 @@ private:
     juce::String lastPatchPath_;
     juce::String patchName_ { "Untitled" };
     std::vector<std::string> offlineSampleIds_;
-    bool patchDirty_ = false;
+    looper::EditStateTracker editState_;   // "unsaved" marker; follows undo/redo
 
     juce::UndoManager undoManager_ { 0, 200 };  // zone edits only; ~200 transactions kept
-    juce::MidiKeyboardState auditionState_;     // UI audition notes -> processBlock MIDI
-    int auditionNote_ = -1;
+    bool auditioning_ = false;                  // a VoiceEngine audition request is held
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LooperAudioProcessor)
 };

@@ -240,8 +240,10 @@ void VoiceEngine::refreshVoicesFromMap() noexcept
         v.zone.pan = z.pan;
         if (z.gainDb != v.zone.gainDb)
         {
+            // Glide (~20 ms) instead of stepping: a gain edit on a sounding note must not click.
             v.zone.gainDb = z.gainDb;
             v.zoneGainLin = dbToLin(z.gainDb);
+            v.zoneGain.setTarget(v.zoneGainLin, GainRamp::samplesFor(sampleRate_));
         }
         // Key / velocity / RR fields only matter at note-on; keep the voice's copy in sync.
         v.zone.keyLow = z.keyLow;
@@ -494,6 +496,7 @@ void VoiceEngine::startVoice(int voiceIndex, int note, int velocity, int channel
     }
     v.velocityAmp = velLin;
     v.zoneGainLin = dbToLin(zone.gainDb);
+    v.zoneGain.reset(v.zoneGainLin);
     v.fileToHostRatio = (v.buffer && sampleRate_ > 0.0)
                             ? (v.buffer->sampleRate / sampleRate_)
                             : 1.0;
@@ -552,6 +555,74 @@ void VoiceEngine::noteOn(int note, int velocity, int channel)
 
     const int idx = allocateVoice(note, channel);
     startVoice(idx, note, velocity, channel, zone, std::move(buffer), zoneIndex);
+}
+
+namespace {
+// auditionRequest_ layout: [63..35] seq | [34] on | [33..14] zone | [13..7] note | [6..0] velocity
+constexpr uint64_t kAudSeqShift = 35;
+constexpr uint64_t kAudOnBit = 1ull << 34;
+constexpr uint64_t kAudZoneShift = 14;
+constexpr uint64_t kAudZoneMask = (1ull << 20) - 1;
+} // namespace
+
+void VoiceEngine::requestAudition(int zoneIndex, int note, int velocity) noexcept
+{
+    if (zoneIndex < 0 || static_cast<uint64_t>(zoneIndex) > kAudZoneMask)
+    {
+        stopAudition();
+        return;
+    }
+    const uint64_t seq = ++auditionSeqIssued_;
+    const uint64_t packed = (seq << kAudSeqShift) | kAudOnBit
+                            | (static_cast<uint64_t>(zoneIndex) << kAudZoneShift)
+                            | (static_cast<uint64_t>(std::clamp(note, 0, 127)) << 7)
+                            | static_cast<uint64_t>(std::clamp(velocity, 1, 127));
+    auditionRequest_.store(packed, std::memory_order_release);
+}
+
+void VoiceEngine::stopAudition() noexcept
+{
+    const uint64_t seq = ++auditionSeqIssued_;
+    auditionRequest_.store(seq << kAudSeqShift, std::memory_order_release);
+}
+
+void VoiceEngine::applyAuditionRequest() noexcept
+{
+    const uint64_t req = auditionRequest_.load(std::memory_order_acquire);
+    const uint64_t seq = req >> kAudSeqShift;
+    if (seq == auditionSeqSeen_)
+        return;
+    auditionSeqSeen_ = seq;
+    // Release whatever the previous request started
+    for (auto& v : voices_)
+    {
+        if (v.active && v.channel == kAuditionChannel && !v.releasing)
+        {
+            v.gated = false;
+            v.pedalHeld = false;
+            v.ampEnv.noteOff();
+            v.releasing = true;
+        }
+    }
+    if ((req & kAudOnBit) == 0)
+        return;
+    const int zoneIndex = static_cast<int>((req >> kAudZoneShift) & kAudZoneMask);
+    const int note = static_cast<int>((req >> 7) & 0x7f);
+    const int velocity = static_cast<int>(req & 0x7f);
+    auditionZoneNow(zoneIndex, note, velocity);
+}
+
+bool VoiceEngine::auditionZoneNow(int zoneIndex, int note, int velocity)
+{
+    if (map_ == nullptr || zoneIndex < 0 || static_cast<size_t>(zoneIndex) >= map_->zones.size() || pool_ == nullptr)
+        return false;
+    const Zone& zone = map_->zones[static_cast<size_t>(zoneIndex)];
+    auto buffer = pool_->getBuffer(zone.sampleId);
+    if (!buffer || buffer->length <= 0 || buffer->interleaved.empty())
+        return false; // offline sample: stay silent
+    const int idx = allocateVoice(note, kAuditionChannel);
+    startVoice(idx, note, std::max(1, velocity), kAuditionChannel, zone, std::move(buffer), zoneIndex);
+    return true;
 }
 
 void VoiceEngine::noteOff(int note, int channel)
@@ -620,6 +691,7 @@ void VoiceEngine::allNotesOff()
 void VoiceEngine::processBlock(float* left, float* right, int numSamples)
 {
     applyPendingMapUpdate();
+    applyAuditionRequest();
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -644,8 +716,8 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
                                      ? std::min(buf.length, *v.zone.sampleEnd)
                                      : buf.length;
         const float pan = std::clamp(v.zone.pan, -1.0f, 1.0f);
-        const float gainL = v.velocityAmp * v.zoneGainLin * masterGainLin_ * (0.5f * (1.0f - pan));
-        const float gainR = v.velocityAmp * v.zoneGainLin * masterGainLin_ * (0.5f * (1.0f + pan));
+        const float baseL = v.velocityAmp * masterGainLin_ * (0.5f * (1.0f - pan));
+        const float baseR = v.velocityAmp * masterGainLin_ * (0.5f * (1.0f + pan));
 
         bool pastEnd = false;
 
@@ -700,9 +772,10 @@ void VoiceEngine::processBlock(float* left, float* right, int numSamples)
                 v.filter.processStereo(sL, sR);
             }
 
-            // Amp after filter (gain from same env)
-            left[i] += sL * env * gainL;
-            right[i] += sR * env * gainR;
+            // Amp after filter (gain from same env); zone gain ramps after live edits
+            const float zg = v.zoneGain.next();
+            left[i] += sL * env * baseL * zg;
+            right[i] += sR * env * baseR * zg;
             v.readPos += v.pitchRatio * v.fileToHostRatio;
         }
 

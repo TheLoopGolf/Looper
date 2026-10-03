@@ -159,6 +159,7 @@ bool LooperAudioProcessor::acceptPendingMap()
     importController_.clearPending();
     swapPlayableMap(std::move(next));
     undoManager_.clearUndoHistory(); // zone indices of the old map are meaningless now
+    editState_.reset(true);          // a fresh import is unsaved until written
     hasUserInstrument_.store(true);
     demoLoaded_ = false;
     if (patchName_.isEmpty() || patchName_ == "Untitled")
@@ -172,7 +173,6 @@ bool LooperAudioProcessor::acceptPendingMap()
         }
     }
     offlineSampleIds_.clear();
-    patchDirty_ = true;
     return true;
 }
 
@@ -291,8 +291,7 @@ void LooperAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::
     buffer.clear();
     syncParamsToEngine();
     voiceEngine_.applyPendingMapUpdate();  // live zone edits, before this block's note-ons
-    // Zone-editor audition notes from the UI join the host MIDI
-    auditionState_.processNextMidiBuffer(midi, 0, buffer.getNumSamples(), true);
+    voiceEngine_.applyAuditionRequest();   // zone-editor audition (exact zone, bypasses RR/overlap)
     for (const auto metadata : midi)
     {
         const auto msg = metadata.getMessage();
@@ -351,7 +350,7 @@ bool LooperAudioProcessor::savePatchToFile(const juce::File& file)
     {
         lastPatchPath_ = file.getFullPathName();
         patchName_ = juce::String(patch.name);
-        patchDirty_ = false;
+        editState_.markSaved();
     }
     return ok;
 }
@@ -402,6 +401,7 @@ bool LooperAudioProcessor::applyPatch(const Patch& patch, juce::StringArray* mis
     userSampleRefs_ = std::move(loadedRefs);
     swapPlayableMap(patch.map);
     undoManager_.clearUndoHistory();
+    editState_.reset(false);
     hasUserInstrument_.store(!patch.map.zones.empty());
     demoLoaded_ = false;
     patchName_ = juce::String(patch.name.empty() ? "Untitled" : patch.name);
@@ -435,7 +435,7 @@ bool LooperAudioProcessor::loadPatchFromFile(const juce::File& file, juce::Strin
     if (ok)
     {
         lastPatchPath_ = file.getFullPathName();
-        patchDirty_ = false;
+        editState_.markSaved();
     }
     return ok;
 }
@@ -483,7 +483,7 @@ bool LooperAudioProcessor::relocateSample(const std::string& sampleId, const juc
     *it = loaded.ref; // new absolute path; PatchStore::save rewrites it relative to the patch
     offlineSampleIds_.erase(std::remove(offlineSampleIds_.begin(), offlineSampleIds_.end(), sampleId),
                             offlineSampleIds_.end());
-    patchDirty_ = true;
+    editState_.markExternalChange(); // not undoable: unsaved until the next save
     return true;
 }
 
@@ -496,7 +496,35 @@ bool LooperAudioProcessor::performZoneEdit(size_t index, const looper::Zone& pro
         return false;
     if (newTransaction)
         undoManager_.beginNewTransaction(actionName);
-    return undoManager_.perform(new looper::ZoneEditAction(*this, std::move(*edit)));
+    return undoManager_.perform(new looper::ZoneEditAction(*this, std::move(*edit), &editState_));
+}
+
+bool LooperAudioProcessor::performZoneEdits(const std::vector<looper::ZoneChange>& changes,
+                                            const juce::String& actionName, bool newTransaction)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    auto edits = looper::makeZoneEdits(copyInstrumentMap(), changes);
+    if (edits.empty())
+        return false;
+    if (newTransaction)
+        undoManager_.beginNewTransaction(actionName);
+    return undoManager_.perform(new looper::ZoneEditAction(*this, std::move(edits), &editState_));
+}
+
+bool LooperAudioProcessor::replaceZones(const std::vector<looper::ZoneEdit>& edits, bool forward)
+{
+    jassert(juce::MessageManager::getInstance()->isThisTheMessageThread());
+    auto next = std::make_shared<InstrumentMap>(copyInstrumentMap());
+    if (! looper::applyZoneEdits(*next, edits, forward))
+        return false;
+    InstrumentMap retired = *next;
+    {
+        std::lock_guard<std::mutex> lock(mapMutex_);
+        std::swap(map_, retired);
+        mapShared_ = next;
+    }
+    voiceEngine_.updateMapLive(next); // one hand-off for the whole group
+    return true;
 }
 
 bool LooperAudioProcessor::replaceZone(size_t index, const std::string& sampleId, const looper::Zone& zone)
@@ -513,7 +541,6 @@ bool LooperAudioProcessor::replaceZone(size_t index, const std::string& sampleId
         mapShared_ = next;
     }
     voiceEngine_.updateMapLive(next); // audio thread adopts it next block; sounding voices follow
-    patchDirty_ = true;
     return true;
 }
 
@@ -526,21 +553,20 @@ const SampleRef* LooperAudioProcessor::findSampleRef(const std::string& sampleId
 
 void LooperAudioProcessor::auditionZone(int zoneIndex, bool down)
 {
-    constexpr int kAuditionChannel = 1;
-    if (auditionNote_ >= 0)
-    {
-        auditionState_.noteOff(kAuditionChannel, auditionNote_, 0.0f);
-        auditionNote_ = -1;
-    }
-    if (! down)
-        return;
     const auto map = copyInstrumentMap();
-    if (! juce::isPositiveAndBelow(zoneIndex, (int) map.zones.size()))
+    if (! down || ! juce::isPositiveAndBelow(zoneIndex, (int) map.zones.size()))
+    {
+        if (auditioning_)
+            voiceEngine_.stopAudition();
+        auditioning_ = false;
         return;
+    }
+    // Targets the zone itself (VoiceEngine::requestAudition), not a MIDI note: overlapping
+    // zones and round-robin selection cannot swap in a different sample.
     int note = 60, velocity = 100;
     looper::auditionNoteFor(map.zones[(size_t) zoneIndex], note, velocity);
-    auditionState_.noteOn(kAuditionChannel, note, (float) velocity / 127.0f);
-    auditionNote_ = note;
+    voiceEngine_.requestAudition(zoneIndex, note, velocity);
+    auditioning_ = true;
 }
 
 looper::RoundRobinMode LooperAudioProcessor::currentRoundRobinMode() const
@@ -616,7 +642,7 @@ void LooperAudioProcessor::setStateInformation(const void* data, int sizeInBytes
                 PatchStore::resolveSamplePaths(*patch, dir);
             }
             applyPatch(*patch, nullptr);
-            patchDirty_ = false;
+            editState_.markSaved();
         }
     }
 

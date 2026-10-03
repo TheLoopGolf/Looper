@@ -5,6 +5,7 @@
 #include "../InstrumentMap/InstrumentMap.h"
 #include "../SamplePool/SamplePool.h"
 #include "FastRng.h"
+#include "GainRamp.h"
 
 #include <array>
 #include <atomic>
@@ -31,7 +32,10 @@ struct Voice
     double glideInc = 0.0;
     double fileToHostRatio = 1.0;
     float velocityAmp = 1.0f;
+    /** Zone gain (linear) the voice is heading to; live edits ramp toward it (zoneGain). */
     float zoneGainLin = 1.0f;
+    /** Per-sample zone gain: ~20 ms linear ramp after a live gain edit (no clicks). */
+    GainRamp zoneGain;
     Zone zone;
     /** Index of `zone` in the map it was picked from (-1 = demo fallback); live edits use it. */
     int zoneIndex = -1;
@@ -82,7 +86,7 @@ public:
      * fields (same zone order). The audio thread adopts it at the start of the next processBlock
      * (try-lock, never blocks; the replaced map is released later on the message thread) and
      * pushes root key / fine tune / transpose / gain / pan into voices that are already sounding
-     * those zones. Key / velocity / RR changes affect the next note-on. RR counters are kept
+     * those zones (gain glides over ~20 ms, GainRamp::kRampSeconds). Key / velocity / RR changes affect the next note-on. RR counters are kept
      * unless the zone count changed.
      */
     void updateMapLive(std::shared_ptr<const InstrumentMap> map);
@@ -133,6 +137,23 @@ public:
     bool sustainPedal() const { return sustainPedal_; }
 
     void noteOn(int note, int velocity, int channel);
+
+    // --- Zone audition (zone editor) -------------------------------------------------------
+    /** Internal channel for audition voices (outside MIDI 1..16, so host notes never collide). */
+    static constexpr int kAuditionChannel = 17;
+
+    /**
+     * Any thread, lock-free: hold `note` / `velocity` on exactly zones[zoneIndex], bypassing
+     * key/velocity matching, overlaps and round-robin. Picked up at the start of the next
+     * processBlock; a newer request replaces an older one (the previous audition is released).
+     */
+    void requestAudition(int zoneIndex, int note, int velocity) noexcept;
+    /** Any thread, lock-free: release the audition note. */
+    void stopAudition() noexcept;
+    /** Audio thread (called by processBlock): act on the latest audition request. */
+    void applyAuditionRequest() noexcept;
+    /** Audio thread: start a voice on zones[zoneIndex] directly. False if no such zone / no audio. */
+    bool auditionZoneNow(int zoneIndex, int note, int velocity);
     void noteOff(int note, int channel);
     void allNotesOff();
 
@@ -208,6 +229,11 @@ private:
     std::array<RrSlot, kRrSlots> rrSlots_ {};
     std::atomic<RoundRobinMode> rrMode_ { RoundRobinMode::Cycle };
     FastRng rng_;
+
+    // Audition hand-off: packed {seq, on, zone, note, velocity} so one atomic carries it all.
+    std::atomic<uint64_t> auditionRequest_ { 0 };
+    uint64_t auditionSeqIssued_ = 0;   // message thread
+    uint64_t auditionSeqSeen_ = 0;     // audio thread
 };
 
 } // namespace looper

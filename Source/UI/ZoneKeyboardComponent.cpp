@@ -4,37 +4,48 @@
 
 namespace looper {
 
+namespace {
+constexpr float kDragThresholdPx = 3.0f;
+}
+
 ZoneKeyboardComponent::ZoneKeyboardComponent()
 {
     setOpaque (false);
     setTitle ("Zone keyboard");
-    setDescription ("Click a zone to edit it; click its root key to audition.");
+    setDescription ("Click a zone to select it (Cmd/Ctrl or Shift to add). Drag edges, root dot or body to edit; "
+                    "Alt/Option-drag draws a key range. Click a root key to hear it.");
 }
 
 void ZoneKeyboardComponent::setZones (const std::vector<ZoneKeySpan>& zones)
 {
     zones_ = zones;
-    if (selected_ >= (int) zones_.size())
-        selected_ = -1;
-    setMouseCursor (zones_.empty() ? juce::MouseCursor::NormalCursor : juce::MouseCursor::PointingHandCursor);
+    selection_.prune (zones_.size());
+    if (zones_.empty())
+        setMouseCursor (juce::MouseCursor::NormalCursor);
     repaint();
 }
 
 void ZoneKeyboardComponent::clearZones()
 {
     zones_.clear();
-    selected_ = -1;
+    selection_.clear();
     setMouseCursor (juce::MouseCursor::NormalCursor);
+    repaint();
+}
+
+void ZoneKeyboardComponent::setSelection (const ZoneSelection& selection)
+{
+    selection_ = selection;
+    selection_.prune (zones_.size());
     repaint();
 }
 
 void ZoneKeyboardComponent::setSelectedZone (int index)
 {
-    const int next = juce::isPositiveAndBelow (index, (int) zones_.size()) ? index : -1;
-    if (next == selected_)
-        return;
-    selected_ = next;
-    repaint();
+    ZoneSelection s;
+    if (juce::isPositiveAndBelow (index, (int) zones_.size()))
+        s.selectOnly ((size_t) index);
+    setSelection (s);
 }
 
 void ZoneKeyboardComponent::setKeyRange (int lowMidi, int highMidi)
@@ -59,113 +70,206 @@ void ZoneKeyboardComponent::fitKeyRangeToRoots()
     setKeyRange (lo, hi);
 }
 
-bool ZoneKeyboardComponent::isBlackKey (int midi) const
-{
-    switch (midi % 12)
-    {
-        case 1: case 3: case 6: case 8: case 10: return true;
-        default: return false;
-    }
-}
-
-int ZoneKeyboardComponent::countWhiteKeys() const
-{
-    int n = 0;
-    for (int m = lowKey_; m <= highKey_; ++m)
-        if (! isBlackKey (m))
-            ++n;
-    return juce::jmax (1, n);
-}
-
-float ZoneKeyboardComponent::keyX (int midi, float whiteW) const
-{
-    int whiteIndex = 0;
-    for (int m = lowKey_; m < midi; ++m)
-        if (! isBlackKey (m))
-            ++whiteIndex;
-    if (isBlackKey (midi))
-        return (float) whiteIndex * whiteW - whiteW * 0.35f;
-    return (float) whiteIndex * whiteW;
-}
-
 juce::Rectangle<float> ZoneKeyboardComponent::keyArea() const
 {
     return getLocalBounds().toFloat().reduced (2.0f).reduced (6.0f, 8.0f);
 }
 
-int ZoneKeyboardComponent::keyAt (juce::Point<float> p) const
+KeyStripLayout ZoneKeyboardComponent::layout() const
 {
-    const auto area = keyArea();
-    if (! area.contains (p))
-        return -1;
-    const float whiteW = area.getWidth() / (float) countWhiteKeys();
-    const float blackW = whiteW * 0.62f;
-    const float blackH = area.getHeight() * 0.62f;
-    if (p.y < area.getY() + blackH)
-    {
-        for (int m = lowKey_; m <= highKey_; ++m)
-        {
-            if (! isBlackKey (m))
-                continue;
-            const float x = area.getX() + keyX (m, whiteW);
-            if (p.x >= x && p.x < x + blackW)
-                return m;
-        }
-    }
-    for (int m = lowKey_; m <= highKey_; ++m)
-    {
-        if (isBlackKey (m))
-            continue;
-        const float x = area.getX() + keyX (m, whiteW);
-        if (p.x >= x && p.x < x + whiteW)
-            return m;
-    }
-    return -1;
+    const auto a = keyArea();
+    KeyStripLayout L;
+    L.lowKey = lowKey_;
+    L.highKey = highKey_;
+    L.x = a.getX();
+    L.y = a.getY();
+    L.width = a.getWidth();
+    L.height = a.getHeight();
+    return L;
 }
 
-void ZoneKeyboardComponent::mouseDown (const juce::MouseEvent& e)
+int ZoneKeyboardComponent::keyAt (juce::Point<float> p) const
 {
-    const int key = keyAt (e.position);
-    if (key < 0 || zones_.empty())
-        return;
+    return layout().keyAt (p.x, p.y);
+}
 
-    // Zones covering this key, in map order
+int ZoneKeyboardComponent::nextStackedZone (int key, int current) const
+{
     std::vector<int> hits;
     for (int i = 0; i < (int) zones_.size(); ++i)
         if (key >= zones_[(size_t) i].low && key <= zones_[(size_t) i].high)
             hits.push_back (i);
-    if (hits.empty())
-        return;
-
-    // A zone whose root is this key wins (audition target); else cycle stacked zones.
-    int pick = -1;
-    if (selected_ >= 0 && zones_[(size_t) selected_].root == key
-        && std::find (hits.begin(), hits.end(), selected_) != hits.end())
-        pick = selected_;
-    if (pick < 0)
-        for (int i : hits)
-            if (zones_[(size_t) i].root == key) { pick = i; break; }
-    if (pick < 0)
-    {
-        const auto it = std::find (hits.begin(), hits.end(), selected_);
-        pick = (it == hits.end() || std::next (it) == hits.end()) ? hits.front() : *std::next (it);
-    }
-
-    setSelectedZone (pick);
-    if (onZoneClicked)
-        onZoneClicked (pick);
-    if (zones_[(size_t) pick].root == key && onAudition)
-    {
-        auditioning_ = pick;
-        onAudition (pick, true);
-    }
+    if (hits.size() < 2)
+        return current;
+    const auto it = std::find (hits.begin(), hits.end(), current);
+    return (it == hits.end() || std::next (it) == hits.end()) ? hits.front() : *std::next (it);
 }
 
-void ZoneKeyboardComponent::mouseUp (const juce::MouseEvent&)
+void ZoneKeyboardComponent::stopAudition()
 {
     if (auditioning_ >= 0 && onAudition)
         onAudition (auditioning_, false);
     auditioning_ = -1;
+}
+
+void ZoneKeyboardComponent::mouseDown (const juce::MouseEvent& e)
+{
+    pressPart_ = StripPart::None;
+    pressZone_ = -1;
+    selectOnlyOnUp_ = -1;
+    cycleOnUp_ = false;
+    dragging_ = false;
+    tooltip_.clear();
+    if (zones_.empty())
+        return;
+
+    const auto L = layout();
+    const auto hit = hitTestStrip (L, zones_, selection_, e.position.x, e.position.y);
+    pressKey_ = hit.key;
+
+    if (e.mods.isAltDown())
+    {
+        // Alt/Option-drag: draw a key range for the selection (or the zone under the pointer)
+        if (selection_.empty() && hit.zone >= 0 && onZoneClicked)
+            onZoneClicked (hit.zone, ClickModifier::None);
+        if (! selection_.empty())
+        {
+            pressPart_ = StripPart::DrawRange;
+            anchorKey_ = L.nearestKey (e.position.x);
+        }
+        return;
+    }
+
+    if (hit.zone < 0)
+        return;
+
+    if (e.mods.isCommandDown() || e.mods.isShiftDown())
+    {
+        if (onZoneClicked)
+            onZoneClicked (hit.zone, e.mods.isShiftDown() ? ClickModifier::Range : ClickModifier::Toggle);
+        return; // modifier clicks only change the selection
+    }
+
+    if (! selection_.contains ((size_t) hit.zone))
+    {
+        if (onZoneClicked)
+            onZoneClicked (hit.zone, ClickModifier::None);
+    }
+    else if (selection_.isMulti())
+        selectOnlyOnUp_ = hit.zone;          // keep the group in case this becomes a drag
+    else
+        cycleOnUp_ = hit.part == StripPart::Body && hit.key != zones_[(size_t) hit.zone].root;
+
+    pressPart_ = hit.part;
+    pressZone_ = hit.zone;
+    anchorKey_ = L.nearestKey (e.position.x);
+
+    const auto& z = zones_[(size_t) hit.zone];
+    if (onAudition && (hit.part == StripPart::Root || (hit.part == StripPart::Body && hit.key == z.root)))
+    {
+        auditioning_ = hit.zone;
+        onAudition (hit.zone, true);
+    }
+}
+
+void ZoneKeyboardComponent::mouseDrag (const juce::MouseEvent& e)
+{
+    if (pressPart_ == StripPart::None)
+        return;
+    if (! dragging_)
+    {
+        if (e.getDistanceFromDragStart() < (int) kDragThresholdPx)
+            return;
+        stopAudition();
+        selectOnlyOnUp_ = -1;
+        cycleOnUp_ = false;
+        if (! onDragStart || ! onDragStart (pressPart_, pressPart_ == StripPart::DrawRange ? -1 : pressZone_, anchorKey_))
+        {
+            pressPart_ = StripPart::None;
+            return;
+        }
+        dragging_ = true;
+        lastDragKey_ = -1;
+    }
+    const int key = layout().nearestKey (e.position.x);
+    tooltipX_ = e.position.x;
+    if (key != lastDragKey_)
+    {
+        lastDragKey_ = key;
+        if (onDragMove)
+            tooltip_ = onDragMove (key);
+    }
+    repaint();
+}
+
+void ZoneKeyboardComponent::mouseUp (const juce::MouseEvent& e)
+{
+    stopAudition();
+    if (dragging_)
+    {
+        dragging_ = false;
+        tooltip_.clear();
+        if (onDragEnd)
+            onDragEnd();
+    }
+    else if (selectOnlyOnUp_ >= 0)
+    {
+        if (onZoneClicked)
+            onZoneClicked (selectOnlyOnUp_, ClickModifier::None);
+    }
+    else if (cycleOnUp_ && pressKey_ >= 0 && pressZone_ >= 0)
+    {
+        const int next = nextStackedZone (pressKey_, pressZone_);
+        if (next != pressZone_ && onZoneClicked)
+            onZoneClicked (next, ClickModifier::None);
+    }
+    pressPart_ = StripPart::None;
+    selectOnlyOnUp_ = -1;
+    cycleOnUp_ = false;
+    updateCursor (&e, e.mods);
+    repaint();
+}
+
+void ZoneKeyboardComponent::mouseMove (const juce::MouseEvent& e)
+{
+    updateCursor (&e, e.mods);
+}
+
+void ZoneKeyboardComponent::mouseExit (const juce::MouseEvent&)
+{
+    if (! dragging_)
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+}
+
+void ZoneKeyboardComponent::modifierKeysChanged (const juce::ModifierKeys& mods)
+{
+    if (isMouseOver() && ! dragging_)
+        updateCursor (nullptr, mods);
+}
+
+void ZoneKeyboardComponent::updateCursor (const juce::MouseEvent* e, const juce::ModifierKeys& mods)
+{
+    if (zones_.empty())
+    {
+        setMouseCursor (juce::MouseCursor::NormalCursor);
+        return;
+    }
+    if (mods.isAltDown() && ! selection_.empty())
+    {
+        setMouseCursor (juce::MouseCursor::CrosshairCursor);
+        return;
+    }
+    const auto pos = e != nullptr ? e->position : getMouseXYRelative().toFloat();
+    const auto hit = hitTestStrip (layout(), zones_, selection_, pos.x, pos.y);
+    switch (hit.part)
+    {
+        case StripPart::LowEdge:
+        case StripPart::HighEdge: setMouseCursor (juce::MouseCursor::LeftRightResizeCursor); break;
+        case StripPart::Body:     setMouseCursor (juce::MouseCursor::DraggingHandCursor); break;
+        case StripPart::Root:     setMouseCursor (juce::MouseCursor::PointingHandCursor); break;
+        case StripPart::DrawRange:
+        case StripPart::None:     setMouseCursor (juce::MouseCursor::NormalCursor); break;
+    }
 }
 
 void ZoneKeyboardComponent::paint (juce::Graphics& g)
@@ -176,20 +280,19 @@ void ZoneKeyboardComponent::paint (juce::Graphics& g)
     g.setColour (Palette::border());
     g.drawRoundedRectangle (bounds, 8.0f, 1.0f);
 
+    const auto L = layout();
     const auto area = keyArea();
-    const int whiteCount = countWhiteKeys();
-    const float whiteW = area.getWidth() / (float) whiteCount;
-    const float whiteH = area.getHeight();
-    const float blackH = whiteH * 0.62f;
-    const float blackW = whiteW * 0.62f;
+    const float whiteW = L.whiteWidth();
+    const float whiteH = L.height;
+    const float blackH = L.blackHeight();
+    const float blackW = L.blackWidth();
 
     // White keys
     for (int m = lowKey_; m <= highKey_; ++m)
     {
-        if (isBlackKey (m))
+        if (KeyStripLayout::isBlack (m))
             continue;
-        const float x = area.getX() + keyX (m, whiteW);
-        auto key = juce::Rectangle<float> (x, area.getY(), whiteW - 1.0f, whiteH);
+        auto key = juce::Rectangle<float> (L.keyLeft (m), area.getY(), whiteW - 1.0f, whiteH);
         g.setColour (zones_.empty() ? Palette::bgRaised().brighter (0.04f)
                                     : juce::Colour (0xffdce8de));
         g.fillRoundedRectangle (key, 2.0f);
@@ -198,44 +301,33 @@ void ZoneKeyboardComponent::paint (juce::Graphics& g)
     }
 
     auto spanRect = [&] (const ZoneKeySpan& z) -> juce::Rectangle<float> {
-        const int lo = juce::jmax (lowKey_, z.low);
-        const int hi = juce::jmin (highKey_, z.high);
-        if (lo > hi)
+        const auto s = L.spanFor (z.low, z.high);
+        if (! s.visible)
             return {};
-        float x0 = area.getWidth();
-        float x1 = 0.0f;
-        for (int m = lo; m <= hi; ++m)
-        {
-            const float x = keyX (m, whiteW);
-            const float w = isBlackKey (m) ? blackW : whiteW;
-            x0 = juce::jmin (x0, x);
-            x1 = juce::jmax (x1, x + w);
-        }
-        if (x1 <= x0)
-            return {};
-        return { area.getX() + x0, area.getY(), x1 - x0, whiteH };
+        return { s.x0, area.getY(), s.x1 - s.x0, whiteH };
     };
 
+    const bool anySelected = ! selection_.empty();
     // Zone overlays (behind black keys for readability)
     for (int zi = 0; zi < (int) zones_.size(); ++zi)
     {
-        if (zi == selected_)
+        if (selection_.contains ((size_t) zi))
             continue;
         const auto overlay = spanRect (zones_[(size_t) zi]);
         if (overlay.isEmpty())
             continue;
         const auto colour = (zi % 2 == 0) ? Palette::fairway() : Palette::brass();
-        g.setColour (colour.withAlpha (selected_ >= 0 ? 0.16f : 0.28f));
+        g.setColour (colour.withAlpha (anySelected ? 0.16f : 0.28f));
         g.fillRoundedRectangle (overlay.reduced (0.5f), 2.0f);
-        g.setColour (colour.withAlpha (selected_ >= 0 ? 0.35f : 0.55f));
+        g.setColour (colour.withAlpha (anySelected ? 0.35f : 0.55f));
         g.drawRoundedRectangle (overlay.reduced (0.5f), 2.0f, 1.0f);
     }
-    if (selected_ >= 0)
+    for (size_t zi : selection_.indices())
     {
-        const auto overlay = spanRect (zones_[(size_t) selected_]);
+        const auto overlay = spanRect (zones_[zi]);
         if (! overlay.isEmpty())
         {
-            g.setColour (Palette::sand().withAlpha (0.30f));
+            g.setColour (Palette::sand().withAlpha ((int) zi == selection_.primary() ? 0.30f : 0.22f));
             g.fillRoundedRectangle (overlay.reduced (0.5f), 2.0f);
         }
     }
@@ -243,36 +335,42 @@ void ZoneKeyboardComponent::paint (juce::Graphics& g)
     // Black keys
     for (int m = lowKey_; m <= highKey_; ++m)
     {
-        if (! isBlackKey (m))
+        if (! KeyStripLayout::isBlack (m))
             continue;
-        const float x = area.getX() + keyX (m, whiteW);
-        auto key = juce::Rectangle<float> (x, area.getY(), blackW, blackH);
+        auto key = juce::Rectangle<float> (L.keyLeft (m), area.getY(), blackW, blackH);
         g.setColour (zones_.empty() ? Palette::bg().darker (0.2f) : juce::Colour (0xff121a14));
         g.fillRoundedRectangle (key, 2.0f);
         g.setColour (Palette::borderBright().withAlpha (0.5f));
         g.drawRoundedRectangle (key, 2.0f, 0.7f);
     }
 
-    // Selected zone outline on top of everything
-    if (selected_ >= 0)
+    // Selected zone outlines + edge grips on top of everything
+    for (size_t zi : selection_.indices())
     {
-        const auto overlay = spanRect (zones_[(size_t) selected_]);
-        if (! overlay.isEmpty())
-        {
-            g.setColour (Palette::sand());
-            g.drawRoundedRectangle (overlay.reduced (1.0f), 2.5f, 2.0f);
-        }
+        const auto& z = zones_[zi];
+        const auto overlay = spanRect (z);
+        if (overlay.isEmpty())
+            continue;
+        const bool primary = (int) zi == selection_.primary();
+        g.setColour (primary ? Palette::sand() : Palette::sand().withAlpha (0.75f));
+        g.drawRoundedRectangle (overlay.reduced (1.0f), 2.5f, primary ? 2.0f : 1.2f);
+        // Edge grips (flag-pin bars) where the edge is on screen
+        const float gy = overlay.getY() + overlay.getHeight() * 0.30f;
+        const float gh = overlay.getHeight() * 0.40f;
+        g.setColour (primary ? Palette::brass() : Palette::brass().withAlpha (0.7f));
+        if (z.low >= lowKey_)
+            g.fillRoundedRectangle (overlay.getX() + 1.0f, gy, 3.0f, gh, 1.5f);
+        if (z.high <= highKey_)
+            g.fillRoundedRectangle (overlay.getRight() - 4.0f, gy, 3.0f, gh, 1.5f);
     }
 
     // Root markers ("ball on the tee"): dot near the bottom of each root key
-    auto rootDot = [&] (int root, bool selected) {
+    auto rootDot = [&] (int root, bool selected, bool primary) {
         if (root < lowKey_ || root > highKey_)
             return;
-        const bool black = isBlackKey (root);
-        const float w = black ? blackW : whiteW;
-        const float cx = area.getX() + keyX (root, whiteW) + (w - (black ? 0.0f : 1.0f)) * 0.5f;
-        const float cy = area.getY() + (black ? blackH : whiteH) - 7.0f;
-        const float r = selected ? 4.0f : 2.6f;
+        const float cx = L.keyCentre (root);
+        const float cy = L.rootMarkerY (root);
+        const float r = primary ? 4.0f : (selected ? 3.4f : 2.6f);
         g.setColour (selected ? Palette::brass() : Palette::fairwayDim());
         g.fillEllipse (cx - r, cy - r, r * 2.0f, r * 2.0f);
         if (selected)
@@ -282,16 +380,33 @@ void ZoneKeyboardComponent::paint (juce::Graphics& g)
         }
     };
     for (int zi = 0; zi < (int) zones_.size(); ++zi)
-        if (zi != selected_)
-            rootDot (zones_[(size_t) zi].root, false);
-    if (selected_ >= 0)
-        rootDot (zones_[(size_t) selected_].root, true);
+        if (! selection_.contains ((size_t) zi))
+            rootDot (zones_[(size_t) zi].root, false, false);
+    for (size_t zi : selection_.indices())
+        rootDot (zones_[zi].root, true, (int) zi == selection_.primary());
 
     if (zones_.empty())
     {
         g.setColour (Palette::muted().withAlpha (0.85f));
         g.setFont (juce::Font (juce::FontOptions (12.0f)));
         g.drawText ("zones appear after import", area, juce::Justification::centred, false);
+    }
+
+    // Live drag tooltip (note names follow the C4 / C3 = 60 setting)
+    if (dragging_ && tooltip_.isNotEmpty())
+    {
+        const juce::Font f (juce::FontOptions (11.5f, juce::Font::bold));
+        g.setFont (f);
+        const float w = juce::GlyphArrangement::getStringWidth (f, tooltip_) + 16.0f;
+        const float h = 20.0f;
+        const float bx = juce::jlimit (bounds.getX() + 2.0f, bounds.getRight() - w - 2.0f, tooltipX_ - w * 0.5f);
+        const auto bubble = juce::Rectangle<float> (bx, bounds.getY() + 2.0f, w, h);
+        g.setColour (Palette::bg().withAlpha (0.92f));
+        g.fillRoundedRectangle (bubble, 6.0f);
+        g.setColour (Palette::brass());
+        g.drawRoundedRectangle (bubble, 6.0f, 1.0f);
+        g.setColour (Palette::text());
+        g.drawText (tooltip_, bubble, juce::Justification::centred, false);
     }
 }
 

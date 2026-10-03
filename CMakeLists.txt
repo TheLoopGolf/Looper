@@ -59,11 +59,15 @@ set_target_properties(LooperPatch PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # ---------------------------------------------------------------------------
 add_library(LooperZoneEdit STATIC
     Source/ZoneEdit/ZoneEditor.cpp
+    Source/ZoneEdit/ZoneSelection.cpp
+    Source/ZoneEdit/ZoneStrip.cpp
 )
 target_include_directories(LooperZoneEdit PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/Source
 )
 target_compile_features(LooperZoneEdit PUBLIC cxx_std_20)
+# Strip tooltips name notes with the AutoMapper's C4/C3 = 60 helpers
+target_link_libraries(LooperZoneEdit PUBLIC LooperAutoMapper)
 set_target_properties(LooperZoneEdit PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ---------------------------------------------------------------------------
@@ -187,6 +191,10 @@ if(LOOPER_BUILD_PLUGIN)
             Source/PatchStore/SampleRelocator.h
             Source/ZoneEdit/ZoneEditor.h
             Source/ZoneEdit/ZoneEditAction.h
+            Source/ZoneEdit/EditHistory.h
+            Source/ZoneEdit/ZoneSelection.h
+            Source/ZoneEdit/ZoneStrip.h
+            Source/VoiceEngine/GainRamp.h
             Source/UI/ZoneEditorPanel.cpp
             Source/UI/ZoneEditorPanel.h
     )
@@ -243,4 +251,26 @@ if(LOOPER_BUILD_TESTS)
             JUCE_WEB_BROWSER=0)
     endif()
     add_test(NAME ZoneEditorTests COMMAND ZoneEditorTests)
+endif()
+
+# ---------------------------------------------------------------------------
+# Zone strip / multi-select tests: strip drag maths, key snapping, clamping, multi-selection
+# relative/absolute edits, saved-state ("unsaved") tracking through undo, gain ramp on
+# sounding notes, exact-zone audition. With JUCE the undo grouping runs on juce::UndoManager.
+# ---------------------------------------------------------------------------
+if(LOOPER_BUILD_TESTS)
+    add_executable(ZoneStripTests Tests/ZoneStripTests.cpp)
+    target_link_libraries(ZoneStripTests PRIVATE LooperZoneEdit LooperDsp LooperPatch)
+    if(LOOPER_BUILD_PLUGIN)
+        target_link_libraries(ZoneStripTests PRIVATE
+            juce::juce_data_structures
+            juce::juce_recommended_config_flags)
+        target_compile_definitions(ZoneStripTests PRIVATE
+            LOOPER_ZONE_EDIT_WITH_JUCE=1
+            JUCE_GLOBAL_MODULE_SETTINGS_INCLUDED=1
+            JUCE_STANDALONE_APPLICATION=1
+            JUCE_USE_CURL=0
+            JUCE_WEB_BROWSER=0)
+    endif()
+    add_test(NAME ZoneStripTests COMMAND ZoneStripTests)
 endif()

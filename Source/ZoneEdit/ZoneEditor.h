@@ -135,6 +135,26 @@ bool replaceZoneInMap(InstrumentMap& map, size_t index, const std::string& sampl
 /** Apply (forward) or revert an edit on a map. */
 bool applyZoneEdit(InstrumentMap& map, const ZoneEdit& edit, bool forward = true);
 
+/** One proposed zone (index into map.zones); a group of them is applied as one undo step. */
+struct ZoneChange
+{
+    size_t index = 0;
+    Zone zone;
+};
+
+/**
+ * Edits for a group of proposed zones (each sanitized), skipping zones that would not change.
+ * Empty when nothing changes, or when any index is out of range / its sample id changed
+ * (a stale proposal never half-applies).
+ */
+std::vector<ZoneEdit> makeZoneEdits(const InstrumentMap& map, const std::vector<ZoneChange>& changes);
+
+/**
+ * Apply (forward) or revert a group of edits on a map, all-or-nothing: every index / sample id
+ * is validated first. Reverting walks the group backwards.
+ */
+bool applyZoneEdits(InstrumentMap& map, const std::vector<ZoneEdit>& edits, bool forward = true);
+
 /** Receiver of undoable zone edits (the audio processor; a fake in tests). */
 class ZoneEditTarget
 {
@@ -142,6 +162,26 @@ public:
     virtual ~ZoneEditTarget() = default;
     /** Replace zones[index] (guarded by sampleId); must push the change to playback. */
     virtual bool replaceZone(size_t index, const std::string& sampleId, const Zone& zone) = 0;
+
+    /**
+     * Apply a group of edits (forward) or revert it as one change. The default calls
+     * replaceZone per edit; the processor overrides it to publish a single live map.
+     */
+    virtual bool replaceZones(const std::vector<ZoneEdit>& edits, bool forward)
+    {
+        bool ok = true;
+        if (forward)
+        {
+            for (const auto& e : edits)
+                ok = replaceZone(e.index, e.sampleId, e.after) && ok;
+        }
+        else
+        {
+            for (auto it = edits.rbegin(); it != edits.rend(); ++it)
+                ok = replaceZone(it->index, it->sampleId, it->before) && ok;
+        }
+        return ok;
+    }
 };
 
 /**
